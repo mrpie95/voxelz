@@ -381,9 +381,11 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             var out: [[CGPoint]] = []
             for obs in observations {
                 guard let all = try? obs.recognizedPoints(.all) else { continue }
+                // Vision unmirrored via `.leftMirrored`, but our depth view is
+                // the raw (mirrored) selfie. Flip x back to match the display.
                 let pts: [CGPoint] = all.values
                     .filter { $0.confidence > 0.3 }
-                    .map { CGPoint(x: $0.location.x, y: 1 - $0.location.y) }
+                    .map { CGPoint(x: 1 - $0.location.x, y: 1 - $0.location.y) }
                 if !pts.isEmpty { out.append(pts) }
             }
             DispatchQueue.main.async { self.hands = out }
