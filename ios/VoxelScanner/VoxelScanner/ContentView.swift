@@ -1,7 +1,23 @@
 import SwiftUI
 
+enum RangeMode: String, CaseIterable, Identifiable {
+    case auto, manual, hand
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .auto: return "AUTO"
+        case .manual: return "MANUAL"
+        case .hand: return "HAND"
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var camera = CameraManager()
+    @State private var mode: RangeMode = .auto
+    @State private var optSpin = true
+    @State private var optHue = true
+    @State private var optScale = true
 
     var body: some View {
         ZStack {
@@ -37,6 +53,18 @@ struct ContentView: View {
                             .foregroundColor(.white.opacity(0.6))
                     }
 
+                    if camera.handMode {
+                        HandControlledShape(
+                            center: camera.handCenter,
+                            pinch: camera.pinch,
+                            handZ: camera.handZ,
+                            spinEnabled: optSpin,
+                            hueEnabled: optHue,
+                            scaleEnabled: optScale
+                        )
+                        .allowsHitTesting(false)
+                    }
+
                     if camera.isCalibrating {
                         BeachballSpinner()
                             .frame(width: 64, height: 64)
@@ -56,43 +84,39 @@ struct ContentView: View {
                             .foregroundColor(.white.opacity(0.8))
                     }
 
-                    Button(action: { camera.handMode.toggle() }) {
-                        HStack {
-                            Image(systemName: camera.handMode ? "hand.raised.fill" : "hand.raised")
-                            Text(camera.handMode ? "HAND: ON" : "HAND: OFF")
-                                .font(.caption.bold())
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 8)
-                        .background(camera.handMode ? Color.green.opacity(0.3) : Color.white.opacity(0.1))
-                        .foregroundColor(.white)
-                        .cornerRadius(8)
-                    }
-
                     HStack(spacing: 12) {
-                        Text("RANGE")
+                        Text("MODE")
                             .font(.caption.bold())
                             .foregroundColor(.white)
-                        Picker("Mode", selection: $camera.autoMode) {
-                            Text("AUTO").tag(true)
-                            Text("MANUAL").tag(false)
+                        Picker("Mode", selection: $mode) {
+                            ForEach(RangeMode.allCases) { m in
+                                Text(m.title).tag(m)
+                            }
                         }
                         .pickerStyle(.segmented)
-                        .onChange(of: camera.autoMode) { _, newValue in
-                            if newValue { camera.recalibrateAuto() }
+                        .onChange(of: mode) { _, newValue in
+                            applyMode(newValue)
                         }
                     }
 
-                    SliderRow(label: "MIN Z",
-                              value: $camera.minZ,
-                              range: 0.05...2.0,
-                              format: "%.2f m",
-                              enabled: !camera.autoMode)
-                    SliderRow(label: "MAX Z",
-                              value: $camera.maxZ,
-                              range: 0.05...2.0,
-                              format: "%.2f m",
-                              enabled: !camera.autoMode)
+                    if mode == .hand {
+                        HStack(spacing: 16) {
+                            ToggleChip(label: "SPIN", on: $optSpin)
+                            ToggleChip(label: "HUE", on: $optHue)
+                            ToggleChip(label: "SCALE", on: $optScale)
+                        }
+                    } else {
+                        SliderRow(label: "MIN Z",
+                                  value: $camera.minZ,
+                                  range: 0.05...2.0,
+                                  format: "%.2f m",
+                                  enabled: mode == .manual)
+                        SliderRow(label: "MAX Z",
+                                  value: $camera.maxZ,
+                                  range: 0.05...2.0,
+                                  format: "%.2f m",
+                                  enabled: mode == .manual)
+                    }
                 }
                 .padding(16)
                 .background(Color.black)
@@ -100,9 +124,97 @@ struct ContentView: View {
         }
         .onAppear {
             camera.start()
-            if camera.autoMode { camera.recalibrateAuto() }
+            applyMode(mode)
         }
         .onDisappear { camera.stop() }
+    }
+
+    private func applyMode(_ m: RangeMode) {
+        switch m {
+        case .auto:
+            camera.autoMode = true
+            camera.handMode = false
+            camera.recalibrateAuto()
+        case .manual:
+            camera.autoMode = false
+            camera.handMode = false
+        case .hand:
+            camera.autoMode = true    // keep Z window auto-tracking the hand
+            camera.handMode = true
+            camera.recalibrateAuto()
+        }
+    }
+}
+
+private struct ToggleChip: View {
+    let label: String
+    @Binding var on: Bool
+    var body: some View {
+        Button(action: { on.toggle() }) {
+            Text(label)
+                .font(.caption.bold())
+                .foregroundColor(on ? .black : .white.opacity(0.7))
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+                .background(on ? Color.white : Color.white.opacity(0.12))
+                .cornerRadius(8)
+        }
+    }
+}
+
+/// A big neon rounded square whose rotation, hue, and scale are driven by
+/// the currently-detected hand. No hand = nothing is shown.
+private struct HandControlledShape: View {
+    let center: CGPoint?
+    let pinch: CGFloat   // 0..~0.5 in display-space units
+    let handZ: Float     // meters; 0 if unavailable
+    let spinEnabled: Bool
+    let hueEnabled: Bool
+    let scaleEnabled: Bool
+
+    var body: some View {
+        GeometryReader { geo in
+            if let c = center {
+                let yaw = spinEnabled ? (c.x - 0.5) * 180 : 0
+                let pitch = spinEnabled ? (0.5 - c.y) * 180 : 0
+                let hue: Double = hueEnabled
+                    ? Double(min(max(pinch / 0.4, 0), 1))
+                    : 0.82     // fixed neon purple when hue control is off
+                let scale: CGFloat = {
+                    guard scaleEnabled else { return 1.0 }
+                    let z = handZ > 0 ? CGFloat(handZ) : 0.4
+                    let t = (0.6 - min(max(z, 0.2), 0.6)) / 0.4
+                    return 0.6 + t * 0.8
+                }()
+                let side = min(geo.size.width, geo.size.height) * 0.45
+                RoundedRectangle(cornerRadius: side * 0.18)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(hue: hue, saturation: 1.0, brightness: 1.0),
+                                Color(hue: (hue + 0.15).truncatingRemainder(dividingBy: 1),
+                                      saturation: 1.0, brightness: 0.7)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: side * 0.18)
+                            .stroke(Color.white.opacity(0.9), lineWidth: 2)
+                    )
+                    .frame(width: side, height: side)
+                    .scaleEffect(scale)
+                    .rotation3DEffect(.degrees(yaw), axis: (x: 0, y: 1, z: 0))
+                    .rotation3DEffect(.degrees(pitch), axis: (x: 1, y: 0, z: 0))
+                    .shadow(color: Color(hue: hue, saturation: 1, brightness: 1).opacity(0.8),
+                            radius: 18)
+                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                    .animation(.easeOut(duration: 0.08), value: c)
+                    .animation(.easeOut(duration: 0.15), value: pinch)
+                    .animation(.easeOut(duration: 0.15), value: handZ)
+            }
+        }
     }
 }
 

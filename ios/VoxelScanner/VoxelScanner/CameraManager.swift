@@ -31,6 +31,11 @@ final class CameraManager: NSObject, ObservableObject {
     /// aligned to the rotated depth view. Grouped per hand.
     @Published var hands: [[CGPoint]] = []
 
+    /// Derived gesture state from the first detected hand.
+    @Published var handCenter: CGPoint? = nil   // normalised display-space
+    @Published var pinch: CGFloat = 0           // 0..1, distance thumb↔index (display-space units)
+    @Published var handZ: Float = 0             // meters, sampled at hand center; 0 if unavailable
+
     private let sessionQueue = DispatchQueue(label: "voxelscanner.session")
     private let dataQueue = DispatchQueue(label: "voxelscanner.data")
 
@@ -50,6 +55,13 @@ final class CameraManager: NSObject, ObservableObject {
     private var emaHi: Float = 0.55
 
     private var loggedFirstFrame = false
+
+    // Snapshot of the last depth frame, so the Vision/video delegate can sample
+    // Z at a hand joint without re-reading the raw CVPixelBuffer.
+    private var lastDepthValues: [Float] = []
+    private var lastDepthW: Int = 0
+    private var lastDepthH: Int = 0
+    private let depthSnapshotLock = NSLock()
 
     // When > 0, the next N frames snap EMA to the measured range (fast lock),
     // and isCalibrating is published true while this counter is running.
@@ -332,6 +344,23 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
         }
 
         let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes, lo: lo, hi: hi)
+
+        // Snapshot depth values for the hand-Z sampler (cheap: 160x120 = 19,200 floats).
+        if handMode {
+            var snap = [Float](repeating: 0, count: w * h)
+            snap.withUnsafeMutableBufferPointer { dst in
+                for v in 0..<h {
+                    let row = base.advanced(by: v * rowBytes).assumingMemoryBound(to: Float.self)
+                    for u in 0..<w { dst[v * w + u] = row[u] }
+                }
+            }
+            depthSnapshotLock.lock()
+            lastDepthValues = snap
+            lastDepthW = w
+            lastDepthH = h
+            depthSnapshotLock.unlock()
+        }
+
         CVPixelBufferUnlockBaseAddress(pb, .readOnly)
         guard let img = img else { return }
 
@@ -361,6 +390,37 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
     }
 }
 
+// MARK: - Depth sampling
+
+extension CameraManager {
+    /// Sample median Z in a 5x5 neighbourhood around a normalised display-space
+    /// point. Returns 0 if no valid samples are available.
+    fileprivate func sampleDepthZ(at p: CGPoint) -> Float {
+        depthSnapshotLock.lock()
+        defer { depthSnapshotLock.unlock() }
+        guard !lastDepthValues.isEmpty else { return 0 }
+        let w = lastDepthW, h = lastDepthH
+        // Display is rotated 90° CW from the raw buffer: disp_x = vy, disp_y = vx
+        // where vx, vy are normalised raw coords. So raw coords from display:
+        //   vx = p.y; vy = p.x
+        let rawU = Int((p.y) * CGFloat(w))
+        let rawV = Int((p.x) * CGFloat(h))
+        var samples: [Float] = []
+        let k = 2
+        for dv in -k...k {
+            for du in -k...k {
+                let u = rawU + du, v = rawV + dv
+                if u < 0 || u >= w || v < 0 || v >= h { continue }
+                let z = lastDepthValues[v * w + u]
+                if z.isFinite && z > 0.05 && z < 3.0 { samples.append(z) }
+            }
+        }
+        guard !samples.isEmpty else { return 0 }
+        samples.sort()
+        return samples[samples.count / 2]
+    }
+}
+
 // MARK: - Video delegate (RGB → Vision hand pose)
 
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -379,16 +439,44 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             try handler.perform([handRequest])
             let observations = handRequest.results ?? []
             var out: [[CGPoint]] = []
-            for obs in observations {
+            var center: CGPoint? = nil
+            var pinchDist: CGFloat = 0
+            var centerZ: Float = 0
+
+            for (idx, obs) in observations.enumerated() {
                 guard let all = try? obs.recognizedPoints(.all) else { continue }
                 // Vision unmirrored via `.leftMirrored`, but our depth view is
                 // the raw (mirrored) selfie. Flip x back to match the display.
+                func mapped(_ p: VNRecognizedPoint) -> CGPoint {
+                    CGPoint(x: 1 - p.location.x, y: 1 - p.location.y)
+                }
                 let pts: [CGPoint] = all.values
                     .filter { $0.confidence > 0.3 }
-                    .map { CGPoint(x: 1 - $0.location.x, y: 1 - $0.location.y) }
-                if !pts.isEmpty { out.append(pts) }
+                    .map(mapped)
+                if pts.isEmpty { continue }
+                out.append(pts)
+
+                if idx == 0 {
+                    let sumX = pts.reduce(0) { $0 + $1.x }
+                    let sumY = pts.reduce(0) { $0 + $1.y }
+                    let c = CGPoint(x: sumX / CGFloat(pts.count),
+                                    y: sumY / CGFloat(pts.count))
+                    center = c
+                    if let thumb = all[.thumbTip], let index = all[.indexTip],
+                       thumb.confidence > 0.3, index.confidence > 0.3 {
+                        let t = mapped(thumb), i = mapped(index)
+                        pinchDist = hypot(t.x - i.x, t.y - i.y)
+                    }
+                    centerZ = sampleDepthZ(at: c)
+                }
             }
-            DispatchQueue.main.async { self.hands = out }
+
+            DispatchQueue.main.async {
+                self.hands = out
+                self.handCenter = center
+                self.pinch = pinchDist
+                self.handZ = centerZ
+            }
         } catch {
             NSLog("[VoxelScanner] hand pose error: \(error)")
         }
