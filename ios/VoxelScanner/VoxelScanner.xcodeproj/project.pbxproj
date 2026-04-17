@@ -11,6 +11,7 @@
 		A1000003000000000000001A /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000004000000000000001A /* ContentView.swift */; };
 		A1000005000000000000001A /* CameraManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000006000000000000001A /* CameraManager.swift */; };
 		A1000007000000000000001A /* CameraPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000008000000000000001A /* CameraPreviewView.swift */; };
+		A1000020000000000000001A /* VoxelPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000021000000000000001A /* VoxelPreviewView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -18,6 +19,7 @@
 		A1000004000000000000001A /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A1000006000000000000001A /* CameraManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraManager.swift; sourceTree = "<group>"; };
 		A1000008000000000000001A /* CameraPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraPreviewView.swift; sourceTree = "<group>"; };
+		A1000021000000000000001A /* VoxelPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VoxelPreviewView.swift; sourceTree = "<group>"; };
 		A100000A000000000000001A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A100000B000000000000001A /* VoxelScanner.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VoxelScanner.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -48,6 +50,7 @@
 				A1000004000000000000001A /* ContentView.swift */,
 				A1000006000000000000001A /* CameraManager.swift */,
 				A1000008000000000000001A /* CameraPreviewView.swift */,
+				A1000021000000000000001A /* VoxelPreviewView.swift */,
 				A100000A000000000000001A /* Info.plist */,
 			);
 			path = VoxelScanner;
@@ -133,6 +136,7 @@
 				A1000003000000000000001A /* ContentView.swift in Sources */,
 				A1000005000000000000001A /* CameraManager.swift in Sources */,
 				A1000007000000000000001A /* CameraPreviewView.swift in Sources */,
+				A1000020000000000000001A /* VoxelPreviewView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -5,11 +5,19 @@ import ImageIO
 import UIKit
 import Combine
 
+protocol CameraFrameConsumer: AnyObject {
+    func cameraManager(_ manager: CameraManager,
+                       didOutputDepth depth: AVDepthData,
+                       rgb: CVPixelBuffer)
+}
+
 final class CameraManager: NSObject, ObservableObject {
     let session = AVCaptureSession()
 
     @Published var isRunning = false
     @Published var statusMessage: String?
+
+    weak var frameConsumer: CameraFrameConsumer?
 
     private let sessionQueue = DispatchQueue(label: "voxelscanner.session")
     private let dataQueue = DispatchQueue(label: "voxelscanner.data")
@@ -20,6 +28,9 @@ final class CameraManager: NSObject, ObservableObject {
 
     private var captureNextFrame = false
     private let ciContext = CIContext()
+
+    private var lastPreviewTime: CFTimeInterval = 0
+    private let previewInterval: CFTimeInterval = 1.0 / 15.0
 
     override init() {
         super.init()
@@ -135,8 +146,6 @@ final class CameraManager: NSObject, ObservableObject {
 extension CameraManager: AVCaptureDataOutputSynchronizerDelegate {
     func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer,
                                 didOutput dataCollection: AVCaptureSynchronizedDataCollection) {
-        guard captureNextFrame else { return }
-
         guard let syncedVideo = dataCollection.synchronizedData(for: videoOutput) as? AVCaptureSynchronizedSampleBufferData,
               let syncedDepth = dataCollection.synchronizedData(for: depthOutput) as? AVCaptureSynchronizedDepthData,
               !syncedVideo.sampleBufferWasDropped,
@@ -144,10 +153,21 @@ extension CameraManager: AVCaptureDataOutputSynchronizerDelegate {
             return
         }
 
-        captureNextFrame = false
-
         let depthData = syncedDepth.depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
         let sampleBuffer = syncedVideo.sampleBuffer
+
+        // Feed the live voxel preview at a throttled rate.
+        if let consumer = frameConsumer,
+           let rgbBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
+            let now = CACurrentMediaTime()
+            if now - lastPreviewTime >= previewInterval {
+                lastPreviewTime = now
+                consumer.cameraManager(self, didOutputDepth: depthData, rgb: rgbBuffer)
+            }
+        }
+
+        guard captureNextFrame else { return }
+        captureNextFrame = false
 
         do {
             let urls = try saveFrame(sampleBuffer: sampleBuffer, depthData: depthData)
