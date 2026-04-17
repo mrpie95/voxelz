@@ -180,13 +180,13 @@ final class CameraManager: NSObject, ObservableObject {
         samples.sort()
 
         func pct(_ p: Double) -> Float { samples[Int(Double(samples.count - 1) * p)] }
-        let near = pct(0.03)
-        let far  = pct(0.65)
+        let near = pct(0.05)
+        let far  = pct(0.45)
 
-        // Ensure a minimum window so the grayscale has real dynamic range,
-        // and cap the window so a distant wall doesn't wash it out.
-        let minWindow: Float = 0.08
-        let maxWindow: Float = 0.45
+        // Tight window = more colour bits across the subject. Cap hard so a
+        // back wall doesn't balloon the range and flatten everything.
+        let minWindow: Float = 0.06
+        let maxWindow: Float = 0.25
         let nearFloor: Float = 0.10     // sensor noise floor; don't anchor closer than this
         let lo = max(near, nearFloor)
         var hi = max(far, lo + minWindow)
@@ -201,7 +201,7 @@ final class CameraManager: NSObject, ObservableObject {
         // Rotate 90° clockwise: source (u, v) → dest (H-1-v, u) in dest of size (H, W).
         let dW = h
         let dH = w
-        var bytes = [UInt8](repeating: 0, count: dW * dH)
+        var bytes = [UInt8](repeating: 0, count: dW * dH * 4) // BGRA
 
         let range = max(0.001, hi - lo)
 
@@ -209,37 +209,56 @@ final class CameraManager: NSObject, ObservableObject {
             let row = base.advanced(by: v * rowBytes).assumingMemoryBound(to: Float.self)
             for u in 0..<w {
                 let z = row[u]
-                let gray: UInt8
-                if !z.isFinite || z <= 0 {
-                    gray = 0
-                } else if z < lo {
-                    gray = 255
-                } else if z > hi {
-                    gray = 25
-                } else {
-                    let n = (z - lo) / range
-                    gray = UInt8((1.0 - n) * 225 + 30)
-                }
                 let dx = (h - 1) - v
                 let dy = u
-                bytes[dy * dW + dx] = gray
+                let i = (dy * dW + dx) * 4
+
+                let r: UInt8, g: UInt8, b: UInt8
+                if !z.isFinite || z <= 0 {
+                    r = 0; g = 0; b = 0
+                } else {
+                    // 0 = near (hot), 1 = far (cool). Clamp outside window.
+                    let t: Float
+                    if z < lo { t = 0 }
+                    else if z > hi { t = 1 }
+                    else { t = (z - lo) / range }
+                    (r, g, b) = Self.turbo(t)
+                }
+                bytes[i + 0] = b
+                bytes[i + 1] = g
+                bytes[i + 2] = r
+                bytes[i + 3] = 255
             }
         }
 
-        let cs = CGColorSpaceCreateDeviceGray()
+        let cs = CGColorSpaceCreateDeviceRGB()
         guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue)
+            .union(.byteOrder32Little)
         guard let cg = CGImage(width: dW,
                                height: dH,
                                bitsPerComponent: 8,
-                               bitsPerPixel: 8,
-                               bytesPerRow: dW,
+                               bitsPerPixel: 32,
+                               bytesPerRow: dW * 4,
                                space: cs,
-                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                               bitmapInfo: bitmapInfo,
                                provider: provider,
                                decode: nil,
                                shouldInterpolate: false,
                                intent: .defaultIntent) else { return nil }
         return UIImage(cgImage: cg)
+    }
+
+    /// Approximate Google "Turbo" colormap (Mikhailov 2019) — smooth, perceptually
+    /// ordered, high contrast across the whole range. Input t in [0, 1].
+    private static func turbo(_ t: Float) -> (UInt8, UInt8, UInt8) {
+        let x = max(0, min(1, t))
+        // Polynomial fit (good enough for 8-bit display).
+        let r = 0.13572138 + x * (4.61539260 + x * (-42.66032258 + x * (132.13108234 + x * (-152.94239396 + x * 59.28637943))))
+        let g = 0.09140261 + x * (2.19418839 + x * (4.84296658 + x * (-14.18503333 + x * (4.27729857 + x * 2.82956604))))
+        let b = 0.10667330 + x * (12.64194608 + x * (-60.58204836 + x * (110.36276771 + x * (-89.90310912 + x * 27.34824973))))
+        func c(_ v: Float) -> UInt8 { UInt8(max(0, min(255, v * 255))) }
+        return (c(r), c(g), c(b))
     }
 }
 
