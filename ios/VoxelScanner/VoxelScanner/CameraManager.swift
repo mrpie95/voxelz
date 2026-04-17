@@ -35,6 +35,9 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var handCenter: CGPoint? = nil   // normalised display-space
     @Published var pinch: CGFloat = 0           // 0..1, distance thumb↔index (display-space units)
     @Published var handZ: Float = 0             // meters, sampled at hand center; 0 if unavailable
+    @Published var thumbTip: CGPoint? = nil     // normalised display-space
+    @Published var indexTip: CGPoint? = nil
+    @Published var pinchZ: Float = 0            // meters, sampled at pinch midpoint
 
     private let sessionQueue = DispatchQueue(label: "voxelscanner.session")
     private let dataQueue = DispatchQueue(label: "voxelscanner.data")
@@ -442,6 +445,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             var center: CGPoint? = nil
             var pinchDist: CGFloat = 0
             var centerZ: Float = 0
+            var thumbPt: CGPoint? = nil
+            var indexPt: CGPoint? = nil
+            var pinchZv: Float = 0
 
             for (idx, obs) in observations.enumerated() {
                 guard let all = try? obs.recognizedPoints(.all) else { continue }
@@ -466,6 +472,10 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                        thumb.confidence > 0.3, index.confidence > 0.3 {
                         let t = mapped(thumb), i = mapped(index)
                         pinchDist = hypot(t.x - i.x, t.y - i.y)
+                        thumbPt = t
+                        indexPt = i
+                        let mid = CGPoint(x: (t.x + i.x) / 2, y: (t.y + i.y) / 2)
+                        pinchZv = sampleDepthZ(at: mid)
                     }
                     centerZ = sampleDepthZ(at: c)
                 }
@@ -476,6 +486,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                 self.handCenter = center
                 self.pinch = pinchDist
                 self.handZ = centerZ
+                self.thumbTip = thumbPt
+                self.indexTip = indexPt
+                self.pinchZ = pinchZv
             }
         } catch {
             NSLog("[VoxelScanner] hand pose error: \(error)")

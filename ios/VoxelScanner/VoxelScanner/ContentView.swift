@@ -17,7 +17,6 @@ struct ContentView: View {
     @State private var mode: RangeMode = .auto
     @State private var optSpin = true
     @State private var optHue = true
-    @State private var optScale = true
 
     var body: some View {
         ZStack {
@@ -54,13 +53,12 @@ struct ContentView: View {
                     }
 
                     if camera.handMode {
-                        HandControlledShape(
-                            center: camera.handCenter,
-                            pinch: camera.pinch,
-                            handZ: camera.handZ,
+                        PinchProjectedShape(
+                            thumb: camera.thumbTip,
+                            index: camera.indexTip,
+                            pinchZ: camera.pinchZ,
                             spinEnabled: optSpin,
-                            hueEnabled: optHue,
-                            scaleEnabled: optScale
+                            hueEnabled: optHue
                         )
                         .allowsHitTesting(false)
                     }
@@ -101,9 +99,8 @@ struct ContentView: View {
 
                     if mode == .hand {
                         HStack(spacing: 16) {
-                            ToggleChip(label: "SPIN", on: $optSpin)
+                            ToggleChip(label: "TILT", on: $optSpin)
                             ToggleChip(label: "HUE", on: $optHue)
-                            ToggleChip(label: "SCALE", on: $optScale)
                         }
                     } else {
                         SliderRow(label: "MIN Z",
@@ -162,38 +159,57 @@ private struct ToggleChip: View {
     }
 }
 
-/// A big neon rounded square whose rotation, hue, and scale are driven by
-/// the currently-detected hand. No hand = nothing is shown.
-private struct HandControlledShape: View {
-    let center: CGPoint?
-    let pinch: CGFloat   // 0..~0.5 in display-space units
-    let handZ: Float     // meters; 0 if unavailable
+/// A neon rounded square projected between the thumb and index finger.
+/// Size = thumb↔index distance (spread to grow). Orientation tilts with the
+/// pinch axis. Hue cycles with pinch distance. Brightness falls with Z so the
+/// shape feels pushed "into" the scene as the hand moves away.
+private struct PinchProjectedShape: View {
+    let thumb: CGPoint?
+    let index: CGPoint?
+    let pinchZ: Float
     let spinEnabled: Bool
     let hueEnabled: Bool
-    let scaleEnabled: Bool
 
     var body: some View {
         GeometryReader { geo in
-            if let c = center {
-                let yaw = spinEnabled ? (c.x - 0.5) * 180 : 0
-                let pitch = spinEnabled ? (0.5 - c.y) * 180 : 0
+            if let t = thumb, let i = index {
+                let mid = CGPoint(x: (t.x + i.x) / 2, y: (t.y + i.y) / 2)
+                let dxN = i.x - t.x
+                let dyN = i.y - t.y
+                let dist = hypot(dxN, dyN) // normalised units
+
+                let minDim = min(geo.size.width, geo.size.height)
+                // Spread-to-grow: each unit of normalised pinch distance → minDim px.
+                let side = max(24, dist * minDim * 1.1)
                 let hue: Double = hueEnabled
-                    ? Double(min(max(pinch / 0.4, 0), 1))
-                    : 0.82     // fixed neon purple when hue control is off
-                let scale: CGFloat = {
-                    guard scaleEnabled else { return 1.0 }
-                    let z = handZ > 0 ? CGFloat(handZ) : 0.4
-                    let t = (0.6 - min(max(z, 0.2), 0.6)) / 0.4
-                    return 0.6 + t * 0.8
+                    ? Double(min(max(dist / 0.4, 0), 1))
+                    : 0.82
+
+                // Orient the shape along the pinch axis.
+                let angleRad = atan2(dyN, dxN)
+                let roll = spinEnabled ? angleRad * 180 / .pi : 0
+
+                // Perspective from hand Z: closer = brighter + slight pop.
+                let z = pinchZ > 0 ? CGFloat(pinchZ) : 0.35
+                let brightness: Double = {
+                    let clamped = min(max(z, 0.15), 0.8)
+                    return 0.55 + Double((0.8 - clamped) / 0.65) * 0.45
                 }()
-                let side = min(geo.size.width, geo.size.height) * 0.45
+                let popScale: CGFloat = {
+                    let clamped = min(max(z, 0.15), 0.8)
+                    return 0.9 + (0.8 - clamped) / 0.65 * 0.25
+                }()
+
+                let cx = mid.x * geo.size.width
+                let cy = mid.y * geo.size.height
+
                 RoundedRectangle(cornerRadius: side * 0.18)
                     .fill(
                         LinearGradient(
                             colors: [
-                                Color(hue: hue, saturation: 1.0, brightness: 1.0),
+                                Color(hue: hue, saturation: 1.0, brightness: brightness),
                                 Color(hue: (hue + 0.15).truncatingRemainder(dividingBy: 1),
-                                      saturation: 1.0, brightness: 0.7)
+                                      saturation: 1.0, brightness: brightness * 0.7)
                             ],
                             startPoint: .topLeading,
                             endPoint: .bottomTrailing
@@ -204,15 +220,15 @@ private struct HandControlledShape: View {
                             .stroke(Color.white.opacity(0.9), lineWidth: 2)
                     )
                     .frame(width: side, height: side)
-                    .scaleEffect(scale)
-                    .rotation3DEffect(.degrees(yaw), axis: (x: 0, y: 1, z: 0))
-                    .rotation3DEffect(.degrees(pitch), axis: (x: 1, y: 0, z: 0))
-                    .shadow(color: Color(hue: hue, saturation: 1, brightness: 1).opacity(0.8),
+                    .scaleEffect(popScale)
+                    .rotationEffect(.degrees(roll))
+                    .shadow(color: Color(hue: hue, saturation: 1, brightness: 1)
+                                .opacity(0.8 * brightness),
                             radius: 18)
-                    .position(x: geo.size.width / 2, y: geo.size.height / 2)
-                    .animation(.easeOut(duration: 0.08), value: c)
-                    .animation(.easeOut(duration: 0.15), value: pinch)
-                    .animation(.easeOut(duration: 0.15), value: handZ)
+                    .position(x: cx, y: cy)
+                    .animation(.easeOut(duration: 0.06), value: mid)
+                    .animation(.easeOut(duration: 0.1), value: dist)
+                    .animation(.easeOut(duration: 0.15), value: pinchZ)
             }
         }
     }
