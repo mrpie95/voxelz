@@ -3,6 +3,7 @@ import AVFoundation
 import CoreVideo
 import UIKit
 import Combine
+import Vision
 
 /// Depth-only TrueDepth manager. Emits a live grayscale UIImage of the
 /// current depth buffer plus (optionally auto-computed) min/max Z.
@@ -24,10 +25,22 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var autoMode: Bool = true
     @Published var isCalibrating: Bool = false
 
+    /// When true, run Vision hand-pose on the RGB stream and publish landmarks.
+    @Published var handMode: Bool = false
+    /// Hand joints in normalised display-space coords (0..1, origin top-left),
+    /// aligned to the rotated depth view. Grouped per hand.
+    @Published var hands: [[CGPoint]] = []
+
     private let sessionQueue = DispatchQueue(label: "voxelscanner.session")
     private let dataQueue = DispatchQueue(label: "voxelscanner.data")
 
     private let depthOutput = AVCaptureDepthDataOutput()
+    private let videoOutput = AVCaptureVideoDataOutput()
+    private let handRequest: VNDetectHumanHandPoseRequest = {
+        let r = VNDetectHumanHandPoseRequest()
+        r.maximumHandCount = 2
+        return r
+    }()
 
     private var frameCount = 0
     private var lastFpsStamp = CACurrentMediaTime()
@@ -92,6 +105,15 @@ final class CameraManager: NSObject, ObservableObject {
             depthOutput.isFilteringEnabled = true
             depthOutput.setDelegate(self, callbackQueue: dataQueue)
             depthOutput.connection(with: .depthData)?.isEnabled = true
+
+            if session.canAddOutput(videoOutput) {
+                session.addOutput(videoOutput)
+                videoOutput.alwaysDiscardsLateVideoFrames = true
+                videoOutput.videoSettings = [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+                ]
+                videoOutput.setSampleBufferDelegate(self, queue: dataQueue)
+            }
 
             if let depthFormat = device.activeFormat.supportedDepthDataFormats.first(where: {
                 CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
@@ -336,5 +358,37 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
                          connection: AVCaptureConnection,
                          reason: AVCaptureOutput.DataDroppedReason) {
         NSLog("[VoxelScanner] depth DROPPED reason=\(reason.rawValue)")
+    }
+}
+
+// MARK: - Video delegate (RGB → Vision hand pose)
+
+extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
+    func captureOutput(_ output: AVCaptureOutput,
+                       didOutput sampleBuffer: CMSampleBuffer,
+                       from connection: AVCaptureConnection) {
+        guard handMode, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // TrueDepth front camera, device in portrait: buffer native orientation
+        // is landscape-right AND mirrored (selfie). `.leftMirrored` tells Vision
+        // to rotate + unmirror so its output is upright and un-flipped.
+        let handler = VNImageRequestHandler(cvPixelBuffer: pb,
+                                            orientation: .leftMirrored,
+                                            options: [:])
+        do {
+            try handler.perform([handRequest])
+            let observations = handRequest.results ?? []
+            var out: [[CGPoint]] = []
+            for obs in observations {
+                guard let all = try? obs.recognizedPoints(.all) else { continue }
+                let pts: [CGPoint] = all.values
+                    .filter { $0.confidence > 0.3 }
+                    .map { CGPoint(x: $0.location.x, y: 1 - $0.location.y) }
+                if !pts.isEmpty { out.append(pts) }
+            }
+            DispatchQueue.main.async { self.hands = out }
+        } catch {
+            NSLog("[VoxelScanner] hand pose error: \(error)")
+        }
     }
 }

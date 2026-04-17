@@ -14,6 +14,24 @@ struct ContentView: View {
                             .resizable()
                             .interpolation(.none)
                             .scaledToFit()
+                            .overlay(
+                                GeometryReader { geo in
+                                    Canvas { ctx, size in
+                                        for hand in camera.hands {
+                                            for p in hand {
+                                                let c = CGPoint(x: p.x * size.width,
+                                                                y: p.y * size.height)
+                                                let r: CGFloat = 5
+                                                let rect = CGRect(x: c.x - r, y: c.y - r,
+                                                                  width: r * 2, height: r * 2)
+                                                ctx.fill(Path(ellipseIn: rect),
+                                                         with: .color(.green))
+                                            }
+                                        }
+                                        _ = geo
+                                    }
+                                }
+                            )
                     } else {
                         Text("Waiting for depth…")
                             .foregroundColor(.white.opacity(0.6))
@@ -36,6 +54,19 @@ struct ContentView: View {
                         Text("\(camera.depthFPS) fps")
                             .font(.caption.monospacedDigit())
                             .foregroundColor(.white.opacity(0.8))
+                    }
+
+                    Button(action: { camera.handMode.toggle() }) {
+                        HStack {
+                            Image(systemName: camera.handMode ? "hand.raised.fill" : "hand.raised")
+                            Text(camera.handMode ? "HAND: ON" : "HAND: OFF")
+                                .font(.caption.bold())
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(camera.handMode ? Color.green.opacity(0.3) : Color.white.opacity(0.1))
+                        .foregroundColor(.white)
+                        .cornerRadius(8)
                     }
 
                     HStack(spacing: 12) {
