@@ -4,78 +4,69 @@ struct ContentView: View {
     @StateObject private var camera = CameraManager()
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                Color.black.ignoresSafeArea()
+        ZStack {
+            Color.black.ignoresSafeArea()
 
-                VStack(spacing: 0) {
-                    // Top half: live RGB preview
-                    ZStack {
-                        CameraPreviewView(session: camera.session)
-                        VStack {
-                            HStack {
-                                Text("RGB")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 8).padding(.vertical, 4)
-                                    .background(Color.black.opacity(0.5))
-                                    .cornerRadius(6)
-                                    .padding(8)
-                                Spacer()
-                            }
-                            Spacer()
-                        }
+            VStack(spacing: 0) {
+                ZStack {
+                    if let img = camera.depthImage {
+                        Image(uiImage: img)
+                            .resizable()
+                            .interpolation(.none)
+                            .scaledToFit()
+                    } else {
+                        Text("Waiting for depth…")
+                            .foregroundColor(.white.opacity(0.6))
                     }
-                    .frame(height: geo.size.height * 0.5)
-                    .clipped()
-
-                    // Bottom half: live voxel preview
-                    ZStack {
-                        VoxelPreviewView(camera: camera)
-                        VStack {
-                            HStack {
-                                Text("VOXELS · DRAG TO ORBIT")
-                                    .font(.caption.bold())
-                                    .foregroundColor(.white)
-                                    .padding(.horizontal, 8).padding(.vertical, 4)
-                                    .background(Color.black.opacity(0.5))
-                                    .cornerRadius(6)
-                                    .padding(8)
-                                Spacer()
-                            }
-                            Spacer()
-                        }
-                    }
-                    .frame(height: geo.size.height * 0.5)
-                    .clipped()
                 }
-                .ignoresSafeArea()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // Overlay: shutter + status
-                VStack {
-                    Spacer()
-                    if let status = camera.statusMessage {
-                        Text(status)
-                            .font(.footnote)
-                            .foregroundColor(.white)
-                            .padding(8)
-                            .background(Color.black.opacity(0.6))
-                            .cornerRadius(8)
-                            .padding(.bottom, 12)
+                VStack(spacing: 12) {
+                    HStack {
+                        Text(camera.statusMessage ?? "—")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.8))
+                        Spacer()
+                        Text("\(camera.depthFPS) fps")
+                            .font(.caption.monospacedDigit())
+                            .foregroundColor(.white.opacity(0.8))
                     }
-                    Button(action: { camera.captureOneFrame() }) {
-                        Circle()
-                            .fill(Color.white)
-                            .frame(width: 70, height: 70)
-                            .overlay(Circle().stroke(Color.black.opacity(0.3), lineWidth: 2))
-                            .shadow(color: .black.opacity(0.5), radius: 6)
-                    }
-                    .padding(.bottom, 32)
-                    .disabled(!camera.isRunning)
+
+                    SliderRow(label: "MIN Z",
+                              value: $camera.minZ,
+                              range: 0.05...2.0,
+                              format: "%.2f m")
+                    SliderRow(label: "MAX Z",
+                              value: $camera.maxZ,
+                              range: 0.05...2.0,
+                              format: "%.2f m")
                 }
+                .padding(16)
+                .background(Color.black)
             }
         }
         .onAppear { camera.start() }
         .onDisappear { camera.stop() }
+    }
+}
+
+private struct SliderRow: View {
+    let label: String
+    @Binding var value: Float
+    let range: ClosedRange<Float>
+    let format: String
+
+    var body: some View {
+        HStack {
+            Text(label)
+                .font(.caption.bold())
+                .foregroundColor(.white)
+                .frame(width: 60, alignment: .leading)
+            Slider(value: $value, in: range)
+            Text(String(format: format, value))
+                .font(.caption.monospacedDigit())
+                .foregroundColor(.white)
+                .frame(width: 70, alignment: .trailing)
+        }
     }
 }

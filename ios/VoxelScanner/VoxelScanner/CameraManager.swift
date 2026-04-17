@@ -1,36 +1,29 @@
 import Foundation
 import AVFoundation
-import CoreImage
-import ImageIO
+import CoreVideo
 import UIKit
 import Combine
 
-protocol CameraFrameConsumer: AnyObject {
-    func cameraManager(_ manager: CameraManager,
-                       didOutputDepth depth: AVDepthData,
-                       rgb: CVPixelBuffer)
-}
-
+/// Depth-only TrueDepth manager. No RGB, no synchronizer, no file saving —
+/// just render the live depth map so we can verify the sensor works.
 final class CameraManager: NSObject, ObservableObject {
     let session = AVCaptureSession()
 
     @Published var isRunning = false
     @Published var statusMessage: String?
+    @Published var depthImage: UIImage?
+    @Published var depthFPS: Int = 0
 
-    weak var frameConsumer: CameraFrameConsumer?
+    @Published var minZ: Float = 0.20    // meters — closer than this = transparent
+    @Published var maxZ: Float = 0.80    // meters — farther than this = transparent
 
     private let sessionQueue = DispatchQueue(label: "voxelscanner.session")
     private let dataQueue = DispatchQueue(label: "voxelscanner.data")
 
-    private let videoOutput = AVCaptureVideoDataOutput()
     private let depthOutput = AVCaptureDepthDataOutput()
-    private var synchronizer: AVCaptureDataOutputSynchronizer?
 
-    private var captureNextFrame = false
-    private let ciContext = CIContext()
-
-    private var lastPreviewTime: CFTimeInterval = 0
-    private let previewInterval: CFTimeInterval = 1.0 / 15.0
+    private var frameCount = 0
+    private var lastFpsStamp = CACurrentMediaTime()
 
     override init() {
         super.init()
@@ -40,7 +33,9 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Setup
 
     private func configure() {
-        guard let device = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) else {
+        guard let device = AVCaptureDevice.default(.builtInTrueDepthCamera,
+                                                   for: .depthData,
+                                                   position: .front) else {
             DispatchQueue.main.async { self.statusMessage = "No TrueDepth camera available" }
             return
         }
@@ -51,51 +46,36 @@ final class CameraManager: NSObject, ObservableObject {
             session.beginConfiguration()
             session.sessionPreset = .photo
 
-            guard session.canAddInput(input) else {
+            if session.canAddInput(input) {
+                session.addInput(input)
+            } else {
                 session.commitConfiguration()
                 DispatchQueue.main.async { self.statusMessage = "Cannot add camera input" }
                 return
             }
-            session.addInput(input)
 
-            guard session.canAddOutput(videoOutput) else {
+            if session.canAddOutput(depthOutput) {
+                session.addOutput(depthOutput)
+            } else {
                 session.commitConfiguration()
+                DispatchQueue.main.async { self.statusMessage = "Cannot add depth output" }
                 return
             }
-            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
-            videoOutput.alwaysDiscardsLateVideoFrames = true
-            session.addOutput(videoOutput)
-
-            guard session.canAddOutput(depthOutput) else {
-                session.commitConfiguration()
-                return
-            }
-            depthOutput.isFilteringEnabled = false
-            session.addOutput(depthOutput)
+            depthOutput.isFilteringEnabled = true
+            depthOutput.setDelegate(self, callbackQueue: dataQueue)
             depthOutput.connection(with: .depthData)?.isEnabled = true
 
-            // After input+outputs are wired, switch to a depth-capable format.
-            // Pick the smallest depth format (Float32 preferred) so the live
-            // unproject stays cheap.
-            let depthFormats = device.activeFormat.supportedDepthDataFormats
-            let preferred = depthFormats.first {
+            if let depthFormat = device.activeFormat.supportedDepthDataFormats.first(where: {
                 CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
-            } ?? depthFormats.min { a, b in
-                let da = CMVideoFormatDescriptionGetDimensions(a.formatDescription)
-                let db = CMVideoFormatDescriptionGetDimensions(b.formatDescription)
-                return Int(da.width) * Int(da.height) < Int(db.width) * Int(db.height)
-            }
-
-            if let depthFormat = preferred {
+            }) ?? device.activeFormat.supportedDepthDataFormats.first {
                 try device.lockForConfiguration()
                 device.activeDepthDataFormat = depthFormat
                 device.unlockForConfiguration()
-            } else {
-                DispatchQueue.main.async { self.statusMessage = "No depth format available" }
+                let dims = CMVideoFormatDescriptionGetDimensions(depthFormat.formatDescription)
+                DispatchQueue.main.async {
+                    self.statusMessage = "Depth format: \(dims.width)x\(dims.height)"
+                }
             }
-
-            synchronizer = AVCaptureDataOutputSynchronizer(dataOutputs: [videoOutput, depthOutput])
-            synchronizer?.setDelegate(self, queue: dataQueue)
 
             session.commitConfiguration()
         } catch {
@@ -114,12 +94,10 @@ final class CameraManager: NSObject, ObservableObject {
                     DispatchQueue.main.async { self.statusMessage = "Camera permission denied" }
                     return
                 }
-                if !self.session.isRunning {
-                    self.session.startRunning()
-                }
+                if !self.session.isRunning { self.session.startRunning() }
                 DispatchQueue.main.async {
                     self.isRunning = self.session.isRunning
-                    self.statusMessage = self.isRunning ? "Ready. Tap to capture." : "Session failed to start."
+                    if !self.isRunning { self.statusMessage = "Session failed to start" }
                 }
             }
         }
@@ -133,155 +111,98 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    func captureOneFrame() {
-        captureNextFrame = true
-        DispatchQueue.main.async { self.statusMessage = "Capturing…" }
-    }
-
     private func requestAuthorization(_ completion: @escaping (Bool) -> Void) {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:
-            completion(true)
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { completion($0) }
-        default:
-            completion(false)
+        case .authorized: completion(true)
+        case .notDetermined: AVCaptureDevice.requestAccess(for: .video) { completion($0) }
+        default: completion(false)
         }
+    }
+
+    // MARK: - Depth rendering
+
+    private func render(_ pb: CVPixelBuffer) -> UIImage? {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+
+        let w = CVPixelBufferGetWidth(pb)
+        let h = CVPixelBufferGetHeight(pb)
+        let rowBytes = CVPixelBufferGetBytesPerRow(pb)
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
+
+        let lo = minZ, hi = maxZ
+        let range = max(0.001, hi - lo)
+
+        var bytes = [UInt8](repeating: 0, count: w * h)
+        for y in 0..<h {
+            let row = base.advanced(by: y * rowBytes).assumingMemoryBound(to: Float.self)
+            for x in 0..<w {
+                let z = row[x]
+                let out: UInt8
+                if !z.isFinite || z <= 0 {
+                    out = 0
+                } else if z < lo {
+                    out = 255                    // closer than window: saturated
+                } else if z > hi {
+                    out = 30                     // farther than window: dark
+                } else {
+                    let n = (z - lo) / range     // 0 (close) → 1 (far)
+                    out = UInt8((1.0 - n) * 225 + 30)
+                }
+                bytes[y * w + x] = out
+            }
+        }
+
+        let cs = CGColorSpaceCreateDeviceGray()
+        guard let provider = CGDataProvider(data: Data(bytes) as CFData) else { return nil }
+        guard let cg = CGImage(width: w,
+                               height: h,
+                               bitsPerComponent: 8,
+                               bitsPerPixel: 8,
+                               bytesPerRow: w,
+                               space: cs,
+                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                               provider: provider,
+                               decode: nil,
+                               shouldInterpolate: false,
+                               intent: .defaultIntent) else { return nil }
+        return UIImage(cgImage: cg)
     }
 }
 
-// MARK: - Synchronized output
+// MARK: - Depth delegate
 
-extension CameraManager: AVCaptureDataOutputSynchronizerDelegate {
-    func dataOutputSynchronizer(_ synchronizer: AVCaptureDataOutputSynchronizer,
-                                didOutput dataCollection: AVCaptureSynchronizedDataCollection) {
-        guard let syncedVideo = dataCollection.synchronizedData(for: videoOutput) as? AVCaptureSynchronizedSampleBufferData,
-              let syncedDepth = dataCollection.synchronizedData(for: depthOutput) as? AVCaptureSynchronizedDepthData,
-              !syncedVideo.sampleBufferWasDropped,
-              !syncedDepth.depthDataWasDropped else {
-            return
-        }
+extension CameraManager: AVCaptureDepthDataOutputDelegate {
+    func depthDataOutput(_ output: AVCaptureDepthDataOutput,
+                         didOutput depthData: AVDepthData,
+                         timestamp: CMTime,
+                         connection: AVCaptureConnection) {
+        let depth = depthData.depthDataType == kCVPixelFormatType_DepthFloat32
+            ? depthData
+            : depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
 
-        let depthData = syncedDepth.depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
-        let sampleBuffer = syncedVideo.sampleBuffer
+        guard let img = render(depth.depthDataMap) else { return }
 
-        // Feed the live voxel preview at a throttled rate.
-        if let consumer = frameConsumer,
-           let rgbBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) {
-            let now = CACurrentMediaTime()
-            if now - lastPreviewTime >= previewInterval {
-                lastPreviewTime = now
-                consumer.cameraManager(self, didOutputDepth: depthData, rgb: rgbBuffer)
-            }
-        }
-
-        guard captureNextFrame else { return }
-        captureNextFrame = false
-
-        do {
-            let urls = try saveFrame(sampleBuffer: sampleBuffer, depthData: depthData)
+        frameCount += 1
+        let now = CACurrentMediaTime()
+        if now - lastFpsStamp >= 1.0 {
+            let fps = Int(Double(frameCount) / (now - lastFpsStamp))
+            frameCount = 0
+            lastFpsStamp = now
             DispatchQueue.main.async {
-                self.statusMessage = "Saved: \(urls.rgb.lastPathComponent)"
+                self.depthFPS = fps
+                self.depthImage = img
             }
-        } catch {
-            DispatchQueue.main.async {
-                self.statusMessage = "Save failed: \(error.localizedDescription)"
-            }
+        } else {
+            DispatchQueue.main.async { self.depthImage = img }
         }
     }
 
-    // MARK: - Save
-
-    private struct SavedURLs { let rgb: URL; let depth: URL; let intrinsics: URL }
-
-    private static let timestampFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "yyyyMMdd-HHmmss-SSS"
-        f.locale = Locale(identifier: "en_US_POSIX")
-        return f
-    }()
-
-    private func saveFrame(sampleBuffer: CMSampleBuffer, depthData: AVDepthData) throws -> SavedURLs {
-        let timestamp = Self.timestampFormatter.string(from: Date())
-        let docs = try FileManager.default.url(for: .documentDirectory, in: .userDomainMask,
-                                               appropriateFor: nil, create: true)
-        let folder = docs.appendingPathComponent("captures/\(timestamp)", isDirectory: true)
-        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-
-        let rgbURL = folder.appendingPathComponent("rgb.jpg")
-        let depthURL = folder.appendingPathComponent("depth_float32.bin")
-        let intrinsicsURL = folder.appendingPathComponent("intrinsics.json")
-
-        try saveJPEG(sampleBuffer: sampleBuffer, to: rgbURL)
-        try saveDepthRaw(depthData: depthData, to: depthURL)
-        try saveIntrinsics(depthData: depthData, sampleBuffer: sampleBuffer, to: intrinsicsURL)
-
-        return SavedURLs(rgb: rgbURL, depth: depthURL, intrinsics: intrinsicsURL)
-    }
-
-    private func saveJPEG(sampleBuffer: CMSampleBuffer, to url: URL) throws {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            throw NSError(domain: "VoxelScanner", code: 1, userInfo: [NSLocalizedDescriptionKey: "No RGB pixel buffer"])
-        }
-        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
-        let colorSpace = CGColorSpaceCreateDeviceRGB()
-        try ciContext.writeJPEGRepresentation(of: ciImage, to: url, colorSpace: colorSpace,
-                                              options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.9])
-    }
-
-    private func saveDepthRaw(depthData: AVDepthData, to url: URL) throws {
-        let map = depthData.depthDataMap
-        CVPixelBufferLockBaseAddress(map, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(map, .readOnly) }
-
-        let width = CVPixelBufferGetWidth(map)
-        let height = CVPixelBufferGetHeight(map)
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(map)
-        guard let base = CVPixelBufferGetBaseAddress(map) else {
-            throw NSError(domain: "VoxelScanner", code: 2, userInfo: [NSLocalizedDescriptionKey: "Depth base address nil"])
-        }
-
-        // Pack into tightly-rowed float32 buffer (width*height floats).
-        var packed = Data(capacity: width * height * MemoryLayout<Float32>.size)
-        for row in 0..<height {
-            let rowPtr = base.advanced(by: row * bytesPerRow)
-            packed.append(Data(bytes: rowPtr, count: width * MemoryLayout<Float32>.size))
-        }
-        try packed.write(to: url)
-    }
-
-    private func saveIntrinsics(depthData: AVDepthData, sampleBuffer: CMSampleBuffer, to url: URL) throws {
-        var payload: [String: Any] = [:]
-
-        let depthMap = depthData.depthDataMap
-        payload["depth_width"] = CVPixelBufferGetWidth(depthMap)
-        payload["depth_height"] = CVPixelBufferGetHeight(depthMap)
-        payload["depth_pixel_format"] = "float32"
-
-        if let pb = CMSampleBufferGetImageBuffer(sampleBuffer) {
-            payload["rgb_width"] = CVPixelBufferGetWidth(pb)
-            payload["rgb_height"] = CVPixelBufferGetHeight(pb)
-        }
-
-        if let calib = depthData.cameraCalibrationData {
-            let m = calib.intrinsicMatrix
-            payload["intrinsic_matrix"] = [
-                [m.columns.0.x, m.columns.0.y, m.columns.0.z],
-                [m.columns.1.x, m.columns.1.y, m.columns.1.z],
-                [m.columns.2.x, m.columns.2.y, m.columns.2.z]
-            ]
-            payload["intrinsic_matrix_reference_dimensions"] = [
-                calib.intrinsicMatrixReferenceDimensions.width,
-                calib.intrinsicMatrixReferenceDimensions.height
-            ]
-            payload["pixel_size_mm"] = calib.pixelSize
-            if let lens = calib.lensDistortionLookupTable {
-                payload["lens_distortion_lookup_count"] = lens.count / MemoryLayout<Float>.size
-            }
-        }
-
-        let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url)
+    func depthDataOutput(_ output: AVCaptureDepthDataOutput,
+                         didDrop depthData: AVDepthData,
+                         timestamp: CMTime,
+                         connection: AVCaptureConnection,
+                         reason: AVCaptureOutput.DataDroppedReason) {
+        // ignore drops
     }
 }
-
