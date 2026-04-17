@@ -32,14 +32,27 @@ struct ContentView: View {
                             .foregroundColor(.white.opacity(0.8))
                     }
 
+                    HStack(spacing: 12) {
+                        Text("RANGE")
+                            .font(.caption.bold())
+                            .foregroundColor(.white)
+                        Picker("Mode", selection: $camera.autoMode) {
+                            Text("AUTO").tag(true)
+                            Text("MANUAL").tag(false)
+                        }
+                        .pickerStyle(.segmented)
+                    }
+
                     SliderRow(label: "MIN Z",
                               value: $camera.minZ,
                               range: 0.05...2.0,
-                              format: "%.2f m")
+                              format: "%.2f m",
+                              enabled: !camera.autoMode)
                     SliderRow(label: "MAX Z",
                               value: $camera.maxZ,
                               range: 0.05...2.0,
-                              format: "%.2f m")
+                              format: "%.2f m",
+                              enabled: !camera.autoMode)
                 }
                 .padding(16)
                 .background(Color.black)
@@ -55,17 +68,20 @@ private struct SliderRow: View {
     @Binding var value: Float
     let range: ClosedRange<Float>
     let format: String
+    let enabled: Bool
 
     var body: some View {
         HStack {
             Text(label)
                 .font(.caption.bold())
-                .foregroundColor(.white)
+                .foregroundColor(enabled ? .white : .white.opacity(0.4))
                 .frame(width: 60, alignment: .leading)
             Slider(value: $value, in: range)
+                .disabled(!enabled)
+                .opacity(enabled ? 1.0 : 0.5)
             Text(String(format: format, value))
                 .font(.caption.monospacedDigit())
-                .foregroundColor(.white)
+                .foregroundColor(enabled ? .white : .white.opacity(0.6))
                 .frame(width: 70, alignment: .trailing)
         }
     }
