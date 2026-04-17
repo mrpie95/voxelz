@@ -35,6 +35,8 @@ final class CameraManager: NSObject, ObservableObject {
     private var emaLo: Float = 0.25
     private var emaHi: Float = 0.55
 
+    private var loggedFirstFrame = false
+
     override init() {
         super.init()
         sessionQueue.async { [weak self] in self?.configure() }
@@ -43,12 +45,15 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Setup
 
     private func configure() {
+        NSLog("[VoxelScanner] configure() begin")
         guard let device = AVCaptureDevice.default(.builtInTrueDepthCamera,
                                                    for: .depthData,
                                                    position: .front) else {
+            NSLog("[VoxelScanner] NO TrueDepth camera")
             DispatchQueue.main.async { self.statusMessage = "No TrueDepth camera available" }
             return
         }
+        NSLog("[VoxelScanner] got device: \(device.localizedName)")
 
         do {
             let input = try AVCaptureDeviceInput(device: device)
@@ -68,6 +73,7 @@ final class CameraManager: NSObject, ObservableObject {
                 DispatchQueue.main.async { self.statusMessage = "Cannot add depth output" }
                 return
             }
+            session.addOutput(depthOutput)
             depthOutput.isFilteringEnabled = true
             depthOutput.setDelegate(self, callbackQueue: dataQueue)
             depthOutput.connection(with: .depthData)?.isEnabled = true
@@ -85,6 +91,7 @@ final class CameraManager: NSObject, ObservableObject {
             }
 
             session.commitConfiguration()
+            NSLog("[VoxelScanner] session configured; preset=\(session.sessionPreset.rawValue) inputs=\(session.inputs.count) outputs=\(session.outputs.count)")
         } catch {
             session.commitConfiguration()
             DispatchQueue.main.async { self.statusMessage = "Setup error: \(error.localizedDescription)" }
@@ -101,7 +108,11 @@ final class CameraManager: NSObject, ObservableObject {
                     DispatchQueue.main.async { self.statusMessage = "Camera permission denied" }
                     return
                 }
-                if !self.session.isRunning { self.session.startRunning() }
+                if !self.session.isRunning {
+                    NSLog("[VoxelScanner] startRunning()")
+                    self.session.startRunning()
+                    NSLog("[VoxelScanner] startRunning returned; isRunning=\(self.session.isRunning)")
+                }
                 DispatchQueue.main.async {
                     self.isRunning = self.session.isRunning
                     if !self.isRunning { self.statusMessage = "Session failed to start" }
@@ -161,7 +172,8 @@ final class CameraManager: NSObject, ObservableObject {
         // and cap the window so a distant wall doesn't wash it out.
         let minWindow: Float = 0.08
         let maxWindow: Float = 0.45
-        var lo = near
+        let nearFloor: Float = 0.10     // sensor noise floor; don't anchor closer than this
+        let lo = max(near, nearFloor)
         var hi = max(far, lo + minWindow)
         if hi - lo > maxWindow { hi = lo + maxWindow }
         return (lo, hi)
@@ -232,6 +244,10 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
         let w = CVPixelBufferGetWidth(pb)
         let h = CVPixelBufferGetHeight(pb)
         let rowBytes = CVPixelBufferGetBytesPerRow(pb)
+        if !loggedFirstFrame {
+            loggedFirstFrame = true
+            NSLog("[VoxelScanner] FIRST depth frame w=\(w) h=\(h) rowBytes=\(rowBytes) type=\(depth.depthDataType)")
+        }
         guard let base = CVPixelBufferGetBaseAddress(pb) else {
             CVPixelBufferUnlockBaseAddress(pb, .readOnly)
             return
@@ -273,5 +289,7 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
                          didDrop depthData: AVDepthData,
                          timestamp: CMTime,
                          connection: AVCaptureConnection,
-                         reason: AVCaptureOutput.DataDroppedReason) { }
+                         reason: AVCaptureOutput.DataDroppedReason) {
+        NSLog("[VoxelScanner] depth DROPPED reason=\(reason.rawValue)")
+    }
 }
