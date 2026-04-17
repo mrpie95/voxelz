@@ -41,7 +41,9 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func configure() {
         session.beginConfiguration()
-        session.sessionPreset = .vga640x480
+        // When we drive activeFormat/activeDepthDataFormat ourselves, the session
+        // must not try to enforce its own preset.
+        session.sessionPreset = .inputPriority
 
         guard let device = AVCaptureDevice.default(.builtInTrueDepthCamera, for: .video, position: .front) else {
             DispatchQueue.main.async { self.statusMessage = "No TrueDepth camera available" }
@@ -50,6 +52,36 @@ final class CameraManager: NSObject, ObservableObject {
         }
 
         do {
+            // Pick a video format that advertises a Float32 depth companion.
+            // Prefer the lowest-res option so the depth map stays at ~640x480
+            // (smaller -> cheaper to unproject live).
+            let candidates = device.formats
+                .filter { !$0.supportedDepthDataFormats.isEmpty }
+                .filter { format in
+                    format.supportedDepthDataFormats.contains { depth in
+                        CMFormatDescriptionGetMediaSubType(depth.formatDescription) == kCVPixelFormatType_DepthFloat32
+                    }
+                }
+                .sorted { a, b in
+                    let da = CMVideoFormatDescriptionGetDimensions(a.formatDescription)
+                    let db = CMVideoFormatDescriptionGetDimensions(b.formatDescription)
+                    return Int(da.width) * Int(da.height) < Int(db.width) * Int(db.height)
+                }
+
+            guard let videoFormat = candidates.first else {
+                DispatchQueue.main.async { self.statusMessage = "No depth-capable format on this camera" }
+                session.commitConfiguration()
+                return
+            }
+            let depthFormat = videoFormat.supportedDepthDataFormats.first {
+                CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
+            }!
+
+            try device.lockForConfiguration()
+            device.activeFormat = videoFormat
+            device.activeDepthDataFormat = depthFormat
+            device.unlockForConfiguration()
+
             let input = try AVCaptureDeviceInput(device: device)
             guard session.canAddInput(input) else {
                 session.commitConfiguration()
@@ -74,15 +106,6 @@ final class CameraManager: NSObject, ObservableObject {
 
             if let connection = depthOutput.connection(with: .depthData) {
                 connection.isEnabled = true
-            }
-
-            // Pick a depth format compatible with the active video format.
-            if let depthFormat = device.activeFormat.supportedDepthDataFormats.first(where: {
-                CMFormatDescriptionGetMediaSubType($0.formatDescription) == kCVPixelFormatType_DepthFloat32
-            }) ?? device.activeFormat.supportedDepthDataFormats.first {
-                try device.lockForConfiguration()
-                device.activeDepthDataFormat = depthFormat
-                device.unlockForConfiguration()
             }
 
             synchronizer = AVCaptureDataOutputSynchronizer(dataOutputs: [videoOutput, depthOutput])
