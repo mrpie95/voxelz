@@ -22,6 +22,7 @@ final class CameraManager: NSObject, ObservableObject {
     /// When true, minZ/maxZ are recomputed every frame from the depth
     /// distribution. Sliders should be disabled in the UI.
     @Published var autoMode: Bool = true
+    @Published var isCalibrating: Bool = false
 
     private let sessionQueue = DispatchQueue(label: "voxelscanner.session")
     private let dataQueue = DispatchQueue(label: "voxelscanner.data")
@@ -36,6 +37,20 @@ final class CameraManager: NSObject, ObservableObject {
     private var emaHi: Float = 0.55
 
     private var loggedFirstFrame = false
+
+    // When > 0, the next N frames snap EMA to the measured range (fast lock),
+    // and isCalibrating is published true while this counter is running.
+    private var calibrateFramesRemaining: Int = 0
+
+    /// Trigger a fresh auto-range lock: clears EMA history so the next frames
+    /// snap to the current scene instead of easing from the old values.
+    func recalibrateAuto() {
+        dataQueue.async { [weak self] in
+            guard let self = self else { return }
+            self.calibrateFramesRemaining = 12
+            DispatchQueue.main.async { self.isCalibrating = true }
+        }
+    }
 
     override init() {
         super.init()
@@ -256,9 +271,20 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
         var lo = minZ, hi = maxZ
         if autoMode {
             if let range = estimateRange(base: base, w: w, h: h, rowBytes: rowBytes) {
-                let alpha: Float = 0.25
-                emaLo = emaLo + alpha * (range.0 - emaLo)
-                emaHi = emaHi + alpha * (range.1 - emaHi)
+                if calibrateFramesRemaining > 0 {
+                    // Snap hard on the first calibration frame, then blend fast.
+                    let alpha: Float = calibrateFramesRemaining == 12 ? 1.0 : 0.6
+                    emaLo = emaLo + alpha * (range.0 - emaLo)
+                    emaHi = emaHi + alpha * (range.1 - emaHi)
+                    calibrateFramesRemaining -= 1
+                    if calibrateFramesRemaining == 0 {
+                        DispatchQueue.main.async { self.isCalibrating = false }
+                    }
+                } else {
+                    let alpha: Float = 0.25
+                    emaLo = emaLo + alpha * (range.0 - emaLo)
+                    emaHi = emaHi + alpha * (range.1 - emaHi)
+                }
                 lo = emaLo
                 hi = emaHi
             }
