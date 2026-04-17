@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>VOXELZ // NEON</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; overflow: hidden;
+    background: #0a0016;
+    font-family: "Courier New", monospace;
+    color: #ff3cac;
+  }
+  #app { position: fixed; inset: 0; }
+  #hud {
+    position: fixed; top: 16px; left: 16px;
+    padding: 10px 14px;
+    border: 1px solid #ff3cac;
+    background: rgba(10, 0, 22, 0.55);
+    text-shadow: 0 0 6px #ff3cac, 0 0 12px #7a00ff;
+    box-shadow: 0 0 8px #ff3cac inset, 0 0 16px #7a00ff;
+    letter-spacing: 2px;
+    font-size: 12px;
+    pointer-events: none;
+    user-select: none;
+  }
+  #hud b { color: #00f0ff; text-shadow: 0 0 6px #00f0ff; }
+  #regen {
+    position: fixed; top: 16px; right: 16px;
+    padding: 10px 14px;
+    border: 1px solid #00f0ff;
+    background: rgba(10, 0, 22, 0.55);
+    color: #00f0ff;
+    font-family: inherit;
+    letter-spacing: 2px;
+    font-size: 12px;
+    cursor: pointer;
+    text-shadow: 0 0 6px #00f0ff;
+    box-shadow: 0 0 8px #00f0ff inset, 0 0 16px #7a00ff;
+  }
+  #regen:hover { background: rgba(0, 240, 255, 0.15); }
+  #panel {
+    position: fixed; bottom: 16px; right: 16px;
+    padding: 12px 14px;
+    border: 1px solid #ff3cac;
+    background: rgba(10, 0, 22, 0.7);
+    color: #ff3cac;
+    font-family: "Courier New", monospace;
+    letter-spacing: 1.5px;
+    font-size: 11px;
+    box-shadow: 0 0 8px #ff3cac inset, 0 0 14px #7a00ff;
+    min-width: 220px;
+    user-select: none;
+  }
+  #panel label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 10px; }
+  #panel label:last-child { margin-bottom: 0; }
+  #panel input[type="range"] { flex: 1; accent-color: #00f0ff; }
+  #panel input[type="checkbox"] { accent-color: #00f0ff; transform: scale(1.2); }
+  #panel .val { color: #00f0ff; min-width: 30px; text-align: right; text-shadow: 0 0 4px #00f0ff; }
+  #panel .title { color: #00f0ff; text-shadow: 0 0 6px #00f0ff; margin-bottom: 10px; font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="hud">
+  VOXELZ <b>32×32×32</b> · FPS <b id="fps">--</b><br/>
+  DRAG TO ROTATE · SCROLL TO ZOOM
+</div>
+<button id="regen">REGEN TERRAIN</button>
+<div id="panel">
+  <div class="title">JED TIME</div>
+  <label>ENABLE <input type="checkbox" id="osc-toggle" /></label>
+  <label>SPEED <input type="range" id="osc-speed" min="0" max="3" step="0.05" value="1" /><span class="val" id="osc-speed-v">1.0</span></label>
+  <label>SPREAD <input type="range" id="osc-spread" min="0" max="2" step="0.05" value="1" /><span class="val" id="osc-spread-v">1.0</span></label>
+  <div class="title" style="margin-top:14px">CHROMA SHIFT</div>
+  <label>ENABLE <input type="checkbox" id="chr-toggle" /></label>
+  <label>SPEED <input type="range" id="chr-speed" min="0" max="3" step="0.05" value="1" /><span class="val" id="chr-speed-v">1.0</span></label>
+  <label>SPREAD <input type="range" id="chr-spread" min="0.1" max="4" step="0.05" value="1" /><span class="val" id="chr-spread-v">1.0</span></label>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
+
+const SIZE = 32;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0a0016);
+scene.fog = new THREE.Fog(0x0a0016, 60, 140);
+
+const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 500);
+camera.position.set(60, 46, 60);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.getElementById('app').appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.8;
+controls.target.set(0, 4, 0);
+
+// neon lights
+scene.add(new THREE.AmbientLight(0x442266, 0.6));
+const magenta = new THREE.PointLight(0xff3cac, 2.2, 120);
+magenta.position.set(25, 30, 25);
+scene.add(magenta);
+const cyan = new THREE.PointLight(0x00f0ff, 2.2, 120);
+cyan.position.set(-25, 25, -25);
+scene.add(cyan);
+const purple = new THREE.PointLight(0x7a00ff, 1.5, 120);
+purple.position.set(0, 40, 0);
+scene.add(purple);
+
+// neon grid floor
+const grid = new THREE.GridHelper(200, 40, 0xff3cac, 0x7a00ff);
+grid.position.y = -0.51;
+grid.material.transparent = true;
+grid.material.opacity = 0.6;
+scene.add(grid);
+
+// bounding cube wireframe
+const boundsGeo = new THREE.BoxGeometry(SIZE, SIZE, SIZE);
+const boundsEdges = new THREE.EdgesGeometry(boundsGeo);
+const bounds = new THREE.LineSegments(boundsEdges, new THREE.LineBasicMaterial({ color: 0x00f0ff, transparent: true, opacity: 0.35 }));
+bounds.position.set(0, SIZE / 2 - 0.5, 0);
+scene.add(bounds);
+
+// neon palette — picked by normalized height
+const palette = [
+  new THREE.Color(0x7a00ff), // deep purple
+  new THREE.Color(0xff006e), // hot pink
+  new THREE.Color(0xff3cac), // magenta
+  new THREE.Color(0xff8a00), // sunset orange
+  new THREE.Color(0xffe600), // neon yellow
+  new THREE.Color(0x00f0ff), // cyan
+];
+
+function pickColor(t) {
+  const scaled = t * (palette.length - 1);
+  const i = Math.floor(scaled);
+  const f = scaled - i;
+  const a = palette[i];
+  const b = palette[Math.min(i + 1, palette.length - 1)];
+  return a.clone().lerp(b, f);
+}
+
+// value-noise terrain
+function hash2(x, y, seed) {
+  let h = Math.sin(x * 127.1 + y * 311.7 + seed * 57.3) * 43758.5453;
+  return h - Math.floor(h);
+}
+function smooth(t) { return t * t * (3 - 2 * t); }
+function valueNoise(x, y, seed) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  const xf = x - xi, yf = y - yi;
+  const v00 = hash2(xi, yi, seed);
+  const v10 = hash2(xi + 1, yi, seed);
+  const v01 = hash2(xi, yi + 1, seed);
+  const v11 = hash2(xi + 1, yi + 1, seed);
+  const sx = smooth(xf), sy = smooth(yf);
+  return (v00 * (1 - sx) + v10 * sx) * (1 - sy) + (v01 * (1 - sx) + v11 * sx) * sy;
+}
+function fbm(x, y, seed) {
+  let amp = 0.5, freq = 1, sum = 0, norm = 0;
+  for (let i = 0; i < 4; i++) {
+    sum += valueNoise(x * freq, y * freq, seed + i * 13) * amp;
+    norm += amp;
+    amp *= 0.5;
+    freq *= 2;
+  }
+  return sum / norm;
+}
+
+// shared uniforms for hue oscillation
+const uTimeUniform = { value: 0 };
+const uOscillateUniform = { value: 0 };
+const uSpeedUniform = { value: 1.0 };
+
+let voxelMesh = null;
+
+function buildWorld(seed) {
+  if (voxelMesh) {
+    scene.remove(voxelMesh);
+    voxelMesh.geometry.dispose();
+    voxelMesh.material.dispose();
+  }
+
+  const positions = [];
+  const colors = [];
+  const half = SIZE / 2 - 0.5;
+
+  // 1. build heightmap so we know neighbors
+  const heights = new Int16Array(SIZE * SIZE);
+  for (let x = 0; x < SIZE; x++) {
+    for (let z = 0; z < SIZE; z++) {
+      const n = fbm(x * 0.12, z * 0.12, seed);
+      heights[x * SIZE + z] = Math.max(1, Math.floor(n * (SIZE * 0.55)));
+    }
+  }
+  const hAt = (x, z) => (x < 0 || z < 0 || x >= SIZE || z >= SIZE) ? 0 : heights[x * SIZE + z];
+
+  // 2. emit voxels, culling fully-enclosed ones
+  for (let x = 0; x < SIZE; x++) {
+    for (let z = 0; z < SIZE; z++) {
+      const h = heights[x * SIZE + z];
+      const hN = hAt(x, z - 1), hS = hAt(x, z + 1), hW = hAt(x - 1, z), hE = hAt(x + 1, z);
+      for (let y = 0; y < h; y++) {
+        // skip if every neighbor (incl vertical) is filled
+        const exposed =
+          y === h - 1 ||           // top exposed
+          y === 0 && false ||       // bottom is under ground
+          y >= hN || y >= hS || y >= hW || y >= hE;
+        if (!exposed) continue;
+        positions.push(x - half, y - 0.5, z - half);
+        let c;
+        if (y < 2) {
+          c = new THREE.Color(0x00ff66); // glowing neon green ground
+        } else {
+          const t = (y - 2) / (SIZE - 3);
+          c = pickColor(t);
+        }
+        const j = 0.92 + hash2(x, z * 7 + y, seed + 11) * 0.08;
+        colors.push(c.r * j, c.g * j, c.b * j);
+      }
+    }
+  }
+
+  const count = positions.length / 3;
+  const geo = new RoundedBoxGeometry(1.08, 1.08, 1.08, 3, 0.12);
+  const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
+
+  // per-instance hue-shift rate + phase
+  const rates = new Float32Array(count);
+  const phases = new Float32Array(count);
+  for (let i = 0; i < count; i++) {
+    rates[i] = 0.3 + Math.random() * 1.7;       // relative speed multiplier
+    phases[i] = Math.random() * Math.PI * 2;    // per-voxel start offset
+  }
+
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = uTimeUniform;
+    shader.uniforms.uOscillate = uOscillateUniform;
+    shader.uniforms.uSpeed = uSpeedUniform;
+
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', `#include <common>
+        attribute float instanceRate;
+        attribute float instancePhase;
+        varying float vRate;
+        varying float vPhase;
+      `)
+      .replace('#include <begin_vertex>', `#include <begin_vertex>
+        vRate = instanceRate;
+        vPhase = instancePhase;
+      `);
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        uniform float uTime;
+        uniform float uOscillate;
+        uniform float uSpeed;
+        varying float vRate;
+        varying float vPhase;
+
+        vec3 rgb2hsv(vec3 c) {
+          vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+          vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+          vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+          float d = q.x - min(q.w, q.y);
+          float e = 1.0e-10;
+          return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+        }
+        vec3 hsv2rgb(vec3 c) {
+          vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+          vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+          return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+        }
+      `)
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        if (uOscillate > 0.5) {
+          vec3 hsv = rgb2hsv(diffuseColor.rgb);
+          hsv.x = fract(hsv.x + uTime * uSpeed * vRate * 0.15 + vPhase * 0.05);
+          diffuseColor.rgb = hsv2rgb(hsv);
+        }
+      `);
+  };
+
+  const mesh = new THREE.InstancedMesh(geo, mat, count);
+  mesh.geometry.setAttribute('instanceRate', new THREE.InstancedBufferAttribute(rates, 1));
+  mesh.geometry.setAttribute('instancePhase', new THREE.InstancedBufferAttribute(phases, 1));
+
+  const dummy = new THREE.Object3D();
+  const color = new THREE.Color();
+  for (let i = 0; i < count; i++) {
+    dummy.position.set(positions[i * 3], positions[i * 3 + 1], positions[i * 3 + 2]);
+    dummy.updateMatrix();
+    mesh.setMatrixAt(i, dummy.matrix);
+    color.setRGB(colors[i * 3], colors[i * 3 + 1], colors[i * 3 + 2]);
+    mesh.setColorAt(i, color);
+  }
+  mesh.instanceMatrix.needsUpdate = true;
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
+  scene.add(mesh);
+  voxelMesh = mesh;
+}
+
+buildWorld(Math.random() * 1000);
+
+document.getElementById('regen').addEventListener('click', () => {
+  buildWorld(Math.random() * 1000);
+});
+
+// post — bloom for that neon glow
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloom = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.35, // strength
+  0.4,  // radius
+  0.7   // threshold
+);
+composer.addPass(bloom);
+
+// CHROMA SHIFT — screen-space oscillating hue projection
+const ChromaShader = {
+  uniforms: {
+    tDiffuse: { value: null },
+    uTime:    { value: 0 },
+    uEnable:  { value: 0 },
+    uSpeed:   { value: 1.0 },
+    uSpread:  { value: 1.0 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }
+  `,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uTime, uEnable, uSpeed, uSpread;
+    varying vec2 vUv;
+    vec3 rgb2hsv(vec3 c) {
+      vec4 K = vec4(0.0, -1.0/3.0, 2.0/3.0, -1.0);
+      vec4 p = mix(vec4(c.bg, K.wz), vec4(c.gb, K.xy), step(c.b, c.g));
+      vec4 q = mix(vec4(p.xyw, c.r), vec4(c.r, p.yzx), step(p.x, c.r));
+      float d = q.x - min(q.w, q.y);
+      float e = 1.0e-10;
+      return vec3(abs(q.z + (q.w - q.y) / (6.0 * d + e)), d / (q.x + e), q.x);
+    }
+    vec3 hsv2rgb(vec3 c) {
+      vec4 K = vec4(1.0, 2.0/3.0, 1.0/3.0, 3.0);
+      vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+      return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+    }
+    void main() {
+      vec4 col = texture2D(tDiffuse, vUv);
+      if (uEnable > 0.5) {
+        // screen-space projected wave: two sines crossing the screen, oscillating in time
+        float s = uSpread;
+        float shift =
+          sin(vUv.x * 6.2831 * s + uTime * uSpeed) * 0.25 +
+          sin(vUv.y * 6.2831 * s * 0.7 + uTime * uSpeed * 1.3) * 0.25;
+        vec3 hsv = rgb2hsv(col.rgb);
+        hsv.x = fract(hsv.x + shift);
+        col.rgb = hsv2rgb(hsv);
+      }
+      gl_FragColor = col;
+    }
+  `,
+};
+const chromaPass = new ShaderPass(ChromaShader);
+composer.addPass(chromaPass);
+composer.addPass(new OutputPass());
+
+// pause autorotate while user drags
+controls.addEventListener('start', () => { controls.autoRotate = false; });
+let idleTimer = null;
+controls.addEventListener('end', () => {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => { controls.autoRotate = true; }, 2500);
+});
+
+function onResize() {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+}
+window.addEventListener('resize', onResize);
+
+// oscillator UI
+const oscToggle = document.getElementById('osc-toggle');
+const oscSpeed = document.getElementById('osc-speed');
+const oscSpread = document.getElementById('osc-spread');
+const oscSpeedV = document.getElementById('osc-speed-v');
+const oscSpreadV = document.getElementById('osc-spread-v');
+
+let spreadFactor = 1.0;
+
+function rebuildRates() {
+  if (!voxelMesh) return;
+  const attr = voxelMesh.geometry.getAttribute('instanceRate');
+  const n = attr.count;
+  for (let i = 0; i < n; i++) {
+    // rate = 1 - spread + spread * (0.3 + rand*1.7); when spread=0 all rates=1, spread=1 default variance
+    const base = 0.3 + Math.random() * 1.7;
+    attr.array[i] = (1 - spreadFactor) + spreadFactor * base;
+  }
+  attr.needsUpdate = true;
+}
+
+oscToggle.addEventListener('change', () => { uOscillateUniform.value = oscToggle.checked ? 1 : 0; });
+oscSpeed.addEventListener('input', () => {
+  uSpeedUniform.value = parseFloat(oscSpeed.value);
+  oscSpeedV.textContent = parseFloat(oscSpeed.value).toFixed(1);
+});
+oscSpread.addEventListener('input', () => {
+  spreadFactor = parseFloat(oscSpread.value);
+  oscSpreadV.textContent = spreadFactor.toFixed(1);
+  rebuildRates();
+});
+
+// CHROMA SHIFT UI
+const chrToggle = document.getElementById('chr-toggle');
+const chrSpeed = document.getElementById('chr-speed');
+const chrSpread = document.getElementById('chr-spread');
+const chrSpeedV = document.getElementById('chr-speed-v');
+const chrSpreadV = document.getElementById('chr-spread-v');
+chrToggle.addEventListener('change', () => { chromaPass.uniforms.uEnable.value = chrToggle.checked ? 1 : 0; });
+chrSpeed.addEventListener('input', () => {
+  chromaPass.uniforms.uSpeed.value = parseFloat(chrSpeed.value);
+  chrSpeedV.textContent = parseFloat(chrSpeed.value).toFixed(1);
+});
+chrSpread.addEventListener('input', () => {
+  chromaPass.uniforms.uSpread.value = parseFloat(chrSpread.value);
+  chrSpreadV.textContent = parseFloat(chrSpread.value).toFixed(1);
+});
+
+const fpsEl = document.getElementById('fps');
+let frames = 0, lastFpsT = performance.now();
+const clock = new THREE.Clock();
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = clock.getDelta();
+  uTimeUniform.value += dt;
+  chromaPass.uniforms.uTime.value += dt;
+  controls.update();
+  composer.render();
+  frames++;
+  const now = performance.now();
+  if (now - lastFpsT >= 500) {
+    const fps = Math.round((frames * 1000) / (now - lastFpsT));
+    fpsEl.textContent = fps;
+    frames = 0;
+    lastFpsT = now;
+  }
+}
+animate();
+</script>
+</body>
+</html>
