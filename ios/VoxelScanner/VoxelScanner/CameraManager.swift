@@ -169,15 +169,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     // MARK: - Depth → rotated grayscale image
 
-    private func renderRotatedCW(pb: CVPixelBuffer, lo: Float, hi: Float) -> UIImage? {
-        CVPixelBufferLockBaseAddress(pb, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
-
-        let w = CVPixelBufferGetWidth(pb)
-        let h = CVPixelBufferGetHeight(pb)
-        let rowBytes = CVPixelBufferGetBytesPerRow(pb)
-        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
-
+    private func renderRotatedCW(base: UnsafeRawPointer, w: Int, h: Int, rowBytes: Int,
+                                 lo: Float, hi: Float) -> UIImage? {
         // Rotate 90° clockwise: source (u, v) → dest (H-1-v, u) in dest of size (H, W).
         let dW = h
         let dH = w
@@ -239,15 +232,15 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
         let w = CVPixelBufferGetWidth(pb)
         let h = CVPixelBufferGetHeight(pb)
         let rowBytes = CVPixelBufferGetBytesPerRow(pb)
-        let base = CVPixelBufferGetBaseAddress(pb)
-        CVPixelBufferUnlockBaseAddress(pb, .readOnly)
-        guard let base = base else { return }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else {
+            CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+            return
+        }
 
-        // Compute auto range (on data thread to keep main thread free).
         var lo = minZ, hi = maxZ
         if autoMode {
             if let range = estimateRange(base: base, w: w, h: h, rowBytes: rowBytes) {
-                let alpha: Float = 0.25      // responsiveness vs stability
+                let alpha: Float = 0.25
                 emaLo = emaLo + alpha * (range.0 - emaLo)
                 emaHi = emaHi + alpha * (range.1 - emaHi)
                 lo = emaLo
@@ -255,7 +248,9 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
             }
         }
 
-        guard let img = renderRotatedCW(pb: pb, lo: lo, hi: hi) else { return }
+        let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes, lo: lo, hi: hi)
+        CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+        guard let img = img else { return }
 
         frameCount += 1
         let now = CACurrentMediaTime()
