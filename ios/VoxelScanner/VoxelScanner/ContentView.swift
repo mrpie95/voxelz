@@ -5,12 +5,13 @@ import simd
 import AVKit
 
 enum RangeMode: String, CaseIterable, Identifiable {
-    case auto, manual, skeleton, orb, torch
+    case auto, manual, live, skeleton, orb, torch
     var id: String { rawValue }
     var title: String {
         switch self {
         case .auto: return "AUTO"
-        case .manual: return "MANUAL"
+        case .manual: return "MAN"
+        case .live: return "LIVE"
         case .skeleton: return "SKEL"
         case .orb: return "ORB"
         case .torch: return "TORCH"
@@ -47,6 +48,9 @@ struct ContentView: View {
                 ZStack {
                     if mode == .torch {
                         TorchPanel(level: torchLevel)
+                    } else if mode == .live {
+                        LiveVoxelView(cloud: camera.liveCloud)
+                            .ignoresSafeArea(edges: .horizontal)
                     } else if let img = camera.depthImage {
                         Image(uiImage: img)
                             .resizable()
@@ -221,6 +225,10 @@ struct ContentView: View {
         case .manual:
             camera.autoMode = false
             camera.handMode = false
+        case .live:
+            camera.autoMode = true
+            camera.handMode = false
+            camera.recalibrateAuto()
         case .skeleton, .orb:
             camera.autoMode = true
             camera.handMode = true
@@ -228,6 +236,7 @@ struct ContentView: View {
         case .torch:
             break
         }
+        camera.liveCloudEnabled = (m == .live)
     }
 }
 
@@ -382,6 +391,98 @@ private struct TorchSlider: View {
                 .foregroundColor(.white.opacity(0.5))
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+}
+
+/// Live point-cloud view that swaps its geometry each time `cloud` changes.
+private struct LiveVoxelView: UIViewRepresentable {
+    let cloud: LiveCloud?
+
+    final class Coordinator {
+        weak var scnView: SCNView?
+        var node: SCNNode?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> SCNView {
+        let v = SCNView()
+        v.backgroundColor = UIColor(white: 0.05, alpha: 1.0)
+        v.allowsCameraControl = true
+        v.antialiasingMode = .multisampling4X
+        v.scene = SCNScene()
+
+        let camNode = SCNNode()
+        camNode.camera = {
+            let c = SCNCamera()
+            c.zNear = 0.01; c.zFar = 50
+            return c
+        }()
+        camNode.position = SCNVector3(0, 0, 0.6)
+        camNode.look(at: SCNVector3(0, 0, 0))
+        v.scene?.rootNode.addChildNode(camNode)
+        v.pointOfView = camNode
+
+        context.coordinator.scnView = v
+        return v
+    }
+
+    func updateUIView(_ uiView: SCNView, context: Context) {
+        guard let cloud = cloud, !cloud.positions.isEmpty else { return }
+        // Tear down the old geometry and swap in a fresh one. At 10 Hz with
+        // ~15k points this is cheap enough to do naively.
+        context.coordinator.node?.removeFromParentNode()
+
+        let centre = (cloud.bboxMin + cloud.bboxMax) * 0.5
+        var verts: [SIMD3<Float>] = []
+        var cols: [SIMD3<Float>] = []
+        verts.reserveCapacity(cloud.positions.count)
+        cols.reserveCapacity(cloud.positions.count)
+        for i in 0..<cloud.positions.count {
+            let p = cloud.positions[i] - centre
+            verts.append(SIMD3<Float>(p.x, -p.y, -p.z))
+            let c = cloud.colors[i]
+            cols.append(SIMD3<Float>(Float(c.x)/255, Float(c.y)/255, Float(c.z)/255))
+        }
+
+        let posData = verts.withUnsafeBufferPointer { Data(buffer: $0) }
+        let colData = cols.withUnsafeBufferPointer { Data(buffer: $0) }
+        let posSource = SCNGeometrySource(
+            data: posData, semantic: .vertex,
+            vectorCount: verts.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride
+        )
+        let colSource = SCNGeometrySource(
+            data: colData, semantic: .color,
+            vectorCount: cols.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride
+        )
+        var indices: [Int32] = (0..<Int32(verts.count)).map { $0 }
+        let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(
+            data: indexData, primitiveType: .point,
+            primitiveCount: verts.count,
+            bytesPerIndex: MemoryLayout<Int32>.size
+        )
+        element.pointSize = 0.006
+        element.minimumPointScreenSpaceRadius = 0.5
+        element.maximumPointScreenSpaceRadius = 200.0
+
+        let geo = SCNGeometry(sources: [posSource, colSource], elements: [element])
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = UIColor.white
+        mat.isDoubleSided = true
+        geo.materials = [mat]
+
+        let node = SCNNode(geometry: geo)
+        node.eulerAngles = SCNVector3(0, 0, -Float.pi / 2)
+        uiView.scene?.rootNode.addChildNode(node)
+        context.coordinator.node = node
     }
 }
 

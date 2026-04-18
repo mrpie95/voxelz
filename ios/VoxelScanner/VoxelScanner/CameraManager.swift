@@ -52,6 +52,13 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var lastCapture: VoxelCapture? = nil
     @Published var isCapturing: Bool = false
 
+    // Live voxel cloud (throttled to ~10 Hz while enabled).
+    @Published var liveCloudEnabled: Bool = false
+    @Published var liveCloud: LiveCloud? = nil
+    private var lastLiveStamp: CFTimeInterval = 0
+    private var currentRGBBuffer: CVPixelBuffer?
+    private let rgbBufferLock = NSLock()
+
     /// Drive the rear torch brightness from the orb spread (0..1). The torch
     /// device is independent from the front TrueDepth session.
     @Published var torchEnabled: Bool = false {
@@ -704,6 +711,32 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
 
         let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes, lo: lo, hi: hi)
 
+        // Live voxel cloud — throttled to ~10 Hz. Must run while we still hold
+        // the depth pixel-buffer lock so we can read raw floats directly.
+        if liveCloudEnabled {
+            let now = CACurrentMediaTime()
+            if now - lastLiveStamp >= 0.1 {
+                lastLiveStamp = now
+                rgbBufferLock.lock()
+                let rgb = currentRGBBuffer
+                rgbBufferLock.unlock()
+                if let rgb = rgb {
+                    var intrinsics = matrix_identity_float3x3
+                    var refDims = CGSize(width: CGFloat(w), height: CGFloat(h))
+                    if let cal = depth.cameraCalibrationData {
+                        intrinsics = cal.intrinsicMatrix
+                        refDims = cal.intrinsicMatrixReferenceDimensions
+                    }
+                    let cloud = LiveCloud.buildFromDepthBuffer(
+                        depthBase: base, w: w, h: h, rowBytes: rowBytes,
+                        rgb: rgb,
+                        intrinsics: intrinsics, intrinsicsReferenceDims: refDims
+                    )
+                    DispatchQueue.main.async { self.liveCloud = cloud }
+                }
+            }
+        }
+
         // If a capture is pending, copy the full depth frame + intrinsics.
         captureLock.lock()
         let needDepthSnap = captureRequested && pendingDepthSnap == nil
@@ -806,6 +839,115 @@ extension CameraManager {
     }
 }
 
+// MARK: - Live voxel cloud
+
+/// Fast, no-file-export voxelisation path used by the live preview.
+struct LiveCloud: Equatable {
+    let positions: [SIMD3<Float>]
+    let colors: [SIMD3<UInt8>]
+    let bboxMin: SIMD3<Float>
+    let bboxMax: SIMD3<Float>
+    let stamp: CFTimeInterval
+
+    static func == (lhs: LiveCloud, rhs: LiveCloud) -> Bool { lhs.stamp == rhs.stamp }
+
+    static func buildFromDepthBuffer(
+        depthBase: UnsafeRawPointer, w: Int, h: Int, rowBytes: Int,
+        rgb: CVPixelBuffer,
+        intrinsics: simd_float3x3, intrinsicsReferenceDims: CGSize
+    ) -> LiveCloud {
+        CVPixelBufferLockBaseAddress(rgb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(rgb, .readOnly) }
+        let rgbW = CVPixelBufferGetWidth(rgb)
+        let rgbH = CVPixelBufferGetHeight(rgb)
+        let rgbRowBytes = CVPixelBufferGetBytesPerRow(rgb)
+        guard let rgbBase = CVPixelBufferGetBaseAddress(rgb) else {
+            return LiveCloud(positions: [], colors: [], bboxMin: .zero, bboxMax: .zero,
+                             stamp: CACurrentMediaTime())
+        }
+        let rgbPtr = rgbBase.assumingMemoryBound(to: UInt8.self)
+
+        let m = intrinsics
+        let refW = Float(intrinsicsReferenceDims.width)
+        let refH = Float(intrinsicsReferenceDims.height)
+        let sX = Float(w) / max(1, refW)
+        let sY = Float(h) / max(1, refH)
+        let fx = m[0, 0] * sX, fy = m[1, 1] * sY
+        let cx = m[2, 0] * sX, cy = m[2, 1] * sY
+
+        let minZ: Float = 0.15, maxZ: Float = 1.2
+        let voxelSize: Float = 0.006   // slightly coarser than capture for speed
+        // Reject depth edges (occlusion-boundary smearing → stretched ghosts).
+        let gradTol: Float = 0.04      // 4 cm absolute neighbour delta
+
+        let rgbSX = Float(rgbW) / Float(w)
+        let rgbSY = Float(rgbH) / Float(h)
+
+        struct Bin { var ix: Int; var iy: Int; var iz: Int; var r: Int; var g: Int; var b: Int; var n: Int }
+        var bins: [Int64: Bin] = [:]
+        bins.reserveCapacity(4096)
+
+        // Edge crop — the outer ~5% of the sensor is noisy.
+        let margin = max(2, min(w, h) / 20)
+        let vStart = margin, vEnd = h - margin
+        let uStart = margin, uEnd = w - margin
+
+        for v in vStart..<vEnd {
+            let row = depthBase.advanced(by: v * rowBytes).assumingMemoryBound(to: Float.self)
+            let rowAbove = depthBase.advanced(by: (v - 1) * rowBytes).assumingMemoryBound(to: Float.self)
+            let rowBelow = depthBase.advanced(by: (v + 1) * rowBytes).assumingMemoryBound(to: Float.self)
+            for u in uStart..<uEnd {
+                let z = row[u]
+                if !z.isFinite || z < minZ || z > maxZ { continue }
+                // Gradient filter: skip pixels adjacent to a big depth jump.
+                let zL = row[u - 1], zR = row[u + 1]
+                let zU = rowAbove[u], zD = rowBelow[u]
+                if abs(z - zL) > gradTol || abs(z - zR) > gradTol ||
+                   abs(z - zU) > gradTol || abs(z - zD) > gradTol { continue }
+
+                let X = (Float(u) - cx) * z / fx
+                let Y = (Float(v) - cy) * z / fy
+                let ix = Int((X / voxelSize).rounded())
+                let iy = Int((Y / voxelSize).rounded())
+                let iz = Int((z / voxelSize).rounded())
+                let ru = min(rgbW - 1, max(0, Int(Float(u) * rgbSX)))
+                let rv = min(rgbH - 1, max(0, Int(Float(v) * rgbSY)))
+                let p = rv * rgbRowBytes + ru * 4
+                let b = Int(rgbPtr[p + 0])
+                let g = Int(rgbPtr[p + 1])
+                let r = Int(rgbPtr[p + 2])
+                let key = (Int64(ix) & 0x1FFFFF)
+                        | ((Int64(iy) & 0x1FFFFF) << 21)
+                        | ((Int64(iz) & 0x1FFFFF) << 42)
+                if var bin = bins[key] {
+                    bin.r += r; bin.g += g; bin.b += b; bin.n += 1
+                    bins[key] = bin
+                } else {
+                    bins[key] = Bin(ix: ix, iy: iy, iz: iz, r: r, g: g, b: b, n: 1)
+                }
+            }
+        }
+
+        var positions: [SIMD3<Float>] = []
+        var colors: [SIMD3<UInt8>] = []
+        positions.reserveCapacity(bins.count)
+        colors.reserveCapacity(bins.count)
+        var mn = SIMD3<Float>(repeating: Float.greatestFiniteMagnitude)
+        var mx = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
+        for bin in bins.values {
+            let p = SIMD3<Float>(Float(bin.ix), Float(bin.iy), Float(bin.iz)) * voxelSize
+            positions.append(p)
+            let n = max(1, bin.n)
+            colors.append(SIMD3<UInt8>(UInt8(bin.r / n), UInt8(bin.g / n), UInt8(bin.b / n)))
+            mn = simd_min(mn, p); mx = simd_max(mx, p)
+        }
+        return LiveCloud(positions: positions, colors: colors,
+                         bboxMin: positions.isEmpty ? .zero : mn,
+                         bboxMax: positions.isEmpty ? .zero : mx,
+                         stamp: CACurrentMediaTime())
+    }
+}
+
 // MARK: - Voxel capture
 
 /// Result of a capture press: a point cloud plus the raw files needed by the
@@ -851,12 +993,24 @@ struct VoxelCapture: Identifiable {
         let rgbSY = Float(rgbH) / Float(depth.height)
         let dw = depth.width, dh = depth.height
 
+        let gradTol: Float = 0.04
+        let margin = max(2, min(dw, dh) / 20)
+        let vStart = margin, vEnd = dh - margin
+        let uStart = margin, uEnd = dw - margin
+
         depth.values.withUnsafeBufferPointer { depthPtr in
             rgbPixels.withUnsafeBufferPointer { rgbPtr in
-                for v in 0..<dh {
-                    for u in 0..<dw {
+                for v in vStart..<vEnd {
+                    for u in uStart..<uEnd {
                         let z = depthPtr[v * dw + u]
                         if !z.isFinite || z < minZ || z > maxZ { continue }
+                        // Gradient filter: kill pixels straddling depth edges.
+                        let zL = depthPtr[v * dw + (u - 1)]
+                        let zR = depthPtr[v * dw + (u + 1)]
+                        let zU = depthPtr[(v - 1) * dw + u]
+                        let zD = depthPtr[(v + 1) * dw + u]
+                        if abs(z - zL) > gradTol || abs(z - zR) > gradTol ||
+                           abs(z - zU) > gradTol || abs(z - zD) > gradTol { continue }
                         let X = (Float(u) - cx) * z / fx
                         let Y = (Float(v) - cy) * z / fy
                         let ix = Int((X / voxelSize).rounded())
@@ -1033,6 +1187,13 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             pendingRGBBuffer = pb
             captureLock.unlock()
             tryFinishCapture()
+        }
+
+        // Keep a current-RGB reference for the live voxel pipeline.
+        if liveCloudEnabled {
+            rgbBufferLock.lock()
+            currentRGBBuffer = pb
+            rgbBufferLock.unlock()
         }
 
         guard handMode else { return }
