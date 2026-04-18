@@ -207,7 +207,9 @@ private struct PalmOrb: View {
                 let hue: Double = hueEnabled
                     ? Double(t)
                     : 0.55
-                _ = forward  // (palm-normal direction no longer drives screen offset)
+                // `forward` is received but no longer drives screen offset —
+                // on a flat display the palm normal points at the camera, so
+                // spread is expressed as orb size instead of screen translation.
                 let z = palmZ > 0 ? CGFloat(palmZ) : 0.35
                 let brightness: Double = {
                     let clamped = min(max(z, 0.15), 0.8)
