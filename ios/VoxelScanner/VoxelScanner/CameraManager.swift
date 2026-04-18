@@ -360,6 +360,77 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
+    /// Quick ticking pattern fired the instant a capture is requested.
+    /// Runs even if continuous haptics are disabled.
+    func playCaptureStartFeedback() {
+        ensureHapticEngine()
+        guard let engine = hapticEngine else { return }
+        do {
+            let ticks: [CHHapticEvent] = (0..<4).map { i in
+                CHHapticEvent(
+                    eventType: .hapticTransient,
+                    parameters: [
+                        CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.5),
+                        CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.95)
+                    ],
+                    relativeTime: TimeInterval(i) * 0.05
+                )
+            }
+            let pattern = try CHHapticPattern(events: ticks, parameters: [])
+            try engine.makePlayer(with: pattern).start(atTime: CHHapticTimeImmediate)
+        } catch {
+            NSLog("[VoxelScanner] capture-start haptic error: \(error)")
+        }
+    }
+
+    /// Soft low "boom" fired when the capture has finished voxelising.
+    func playCaptureDoneFeedback() {
+        ensureHapticEngine()
+        guard let engine = hapticEngine else { return }
+        do {
+            let events = [
+                CHHapticEvent(
+                    eventType: .hapticTransient,
+                    parameters: [
+                        CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0),
+                        CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.15)
+                    ],
+                    relativeTime: 0
+                ),
+                CHHapticEvent(
+                    eventType: .hapticContinuous,
+                    parameters: [
+                        CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.5),
+                        CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.1)
+                    ],
+                    relativeTime: 0.05,
+                    duration: 0.22
+                )
+            ]
+            let pattern = try CHHapticPattern(events: events, parameters: [])
+            try engine.makePlayer(with: pattern).start(atTime: CHHapticTimeImmediate)
+        } catch {
+            NSLog("[VoxelScanner] capture-done haptic error: \(error)")
+        }
+    }
+
+    /// Make sure the engine is running — used by the one-shot capture feedbacks
+    /// so they work regardless of whether the continuous HAPTIC toggle is on.
+    private func ensureHapticEngine() {
+        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else { return }
+        do {
+            if hapticEngine == nil {
+                let engine = try CHHapticEngine()
+                engine.playsHapticsOnly = true
+                engine.isAutoShutdownEnabled = true
+                hapticEngine = engine
+            }
+            try hapticEngine?.start()
+        } catch {
+            NSLog("[VoxelScanner] haptic ensure error: \(error)")
+        }
+    }
+
     private func playConfirmationTap() {
         guard let engine = hapticEngine else { return }
         do {
@@ -446,6 +517,7 @@ final class CameraManager: NSObject, ObservableObject {
         pendingRGBBuffer = nil
         captureLock.unlock()
         DispatchQueue.main.async { self.isCapturing = true }
+        playCaptureStartFeedback()
     }
 
     private func tryFinishCapture() {
@@ -468,6 +540,7 @@ final class CameraManager: NSObject, ObservableObject {
             DispatchQueue.main.async {
                 self?.lastCapture = cap
                 self?.isCapturing = false
+                self?.playCaptureDoneFeedback()
             }
         }
     }

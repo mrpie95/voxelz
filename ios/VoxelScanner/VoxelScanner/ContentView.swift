@@ -2,6 +2,7 @@ import SwiftUI
 import UIKit
 import SceneKit
 import simd
+import AVKit
 
 enum RangeMode: String, CaseIterable, Identifiable {
     case auto, manual, skeleton, orb, torch
@@ -185,6 +186,14 @@ struct ContentView: View {
                 camera.lastCapture = nil
             }
         }
+        .background(
+            // Volume-up / volume-down become shutter triggers in any capture-
+            // capable mode. Uses AVCaptureEventInteraction (iOS 17.2+).
+            VolumeCaptureTrigger(enabled: mode != .torch) {
+                camera.captureVoxels()
+            }
+            .allowsHitTesting(false)
+        )
     }
 
     private func applyMode(_ m: RangeMode) {
@@ -372,6 +381,47 @@ private struct TorchSlider: View {
                 .font(.caption2)
                 .foregroundColor(.white.opacity(0.5))
                 .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
+/// Hardware volume buttons trigger the capture via AVCaptureEventInteraction.
+/// iOS 17.2+ only — falls back to no-op on older OSes.
+private struct VolumeCaptureTrigger: UIViewRepresentable {
+    let enabled: Bool
+    let onCapture: () -> Void
+
+    final class Host: UIView {
+        var onCapture: (() -> Void)?
+        fileprivate var interaction: Any?
+    }
+
+    func makeUIView(context: Context) -> Host {
+        let v = Host()
+        v.backgroundColor = .clear
+        v.onCapture = onCapture
+        if #available(iOS 17.2, *) {
+            let interaction = AVCaptureEventInteraction(
+                primary: { ev in
+                    if ev.phase == .began { v.onCapture?() }
+                },
+                secondary: { ev in
+                    if ev.phase == .began { v.onCapture?() }
+                }
+            )
+            interaction.isEnabled = enabled
+            v.addInteraction(interaction)
+            v.interaction = interaction
+        }
+        return v
+    }
+
+    func updateUIView(_ uiView: Host, context: Context) {
+        uiView.onCapture = onCapture
+        if #available(iOS 17.2, *) {
+            if let i = uiView.interaction as? AVCaptureEventInteraction {
+                i.isEnabled = enabled
+            }
         }
     }
 }
