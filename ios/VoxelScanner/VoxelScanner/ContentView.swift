@@ -557,11 +557,22 @@ private struct VoxelSceneView: UIViewRepresentable {
                 primitiveCount: verts.count,
                 bytesPerIndex: MemoryLayout<Int32>.size
             )
-            element.pointSize = 4
-            element.minimumPointScreenSpaceRadius = 1.5
-            element.maximumPointScreenSpaceRadius = 6.0
+            element.pointSize = 8
+            element.minimumPointScreenSpaceRadius = 3.0
+            element.maximumPointScreenSpaceRadius = 12.0
 
             let geo = SCNGeometry(sources: [posSource, colSource], elements: [element])
+            // Points have no normals → default Blinn/Phong shading returns 0
+            // and everything renders black. Force unlit shading so vertex
+            // colours come through as-is.
+            let mat = SCNMaterial()
+            mat.lightingModel = .constant
+            mat.isDoubleSided = true
+            mat.diffuse.contents = UIColor.white
+            mat.writesToDepthBuffer = true
+            mat.readsFromDepthBuffer = true
+            geo.materials = [mat]
+
             let node = SCNNode(geometry: geo)
             scene.rootNode.addChildNode(node)
         }
