@@ -341,14 +341,39 @@ final class CameraManager: NSObject, ObservableObject {
             try hapticEngine?.start()
             rebuildHapticPlayer()
             try hapticPlayer?.start(atTime: CHHapticTimeImmediate)
+            // Start silent — the video delegate will ramp intensity from spread.
+            updateHaptics(intensity: 0, sharpness: 0.5)
+            // Quick "on" confirmation pulse so the user knows it's live.
+            playConfirmationTap()
         } catch {
             NSLog("[VoxelScanner] haptic start error: \(error)")
         }
     }
 
+    private func playConfirmationTap() {
+        guard let engine = hapticEngine else { return }
+        do {
+            let event = CHHapticEvent(
+                eventType: .hapticTransient,
+                parameters: [
+                    CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.8),
+                    CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.7)
+                ],
+                relativeTime: 0
+            )
+            let pattern = try CHHapticPattern(events: [event], parameters: [])
+            let p = try engine.makePlayer(with: pattern)
+            try p.start(atTime: CHHapticTimeImmediate)
+        } catch {
+            NSLog("[VoxelScanner] confirm tap error: \(error)")
+        }
+    }
+
     private func rebuildHapticPlayer() {
         do {
-            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.0)
+            // Base values must be > 0: dynamic parameters are multipliers.
+            // value=0 base ⇒ 0 × anything = silent (this was the bug).
+            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 1.0)
             let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.5)
             // One long continuous event we modulate via dynamic parameters.
             let event = CHHapticEvent(eventType: .hapticContinuous,
