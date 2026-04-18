@@ -116,6 +116,7 @@ struct ContentView: View {
                     if mode == .orb {
                         HStack(spacing: 16) {
                             ToggleChip(label: "HUE", on: $optHue)
+                            ToggleChip(label: "TORCH", on: $camera.torchEnabled)
                         }
                     } else if mode == .skeleton {
                         Text("21 joints per hand · up to 2 hands")
@@ -160,6 +161,7 @@ struct ContentView: View {
             camera.handMode = true
             camera.recalibrateAuto()
         }
+        if m != .orb { camera.torchEnabled = false }
     }
 }
 

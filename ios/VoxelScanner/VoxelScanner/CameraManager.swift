@@ -45,6 +45,35 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var fingerSpread: CGFloat = 0       // mean fingertip→palm distance (display units)
     @Published var palmZ: Float = 0                // meters
 
+    /// Drive the rear torch brightness from the orb spread (0..1). The torch
+    /// device is independent from the front TrueDepth session.
+    @Published var torchEnabled: Bool = false {
+        didSet {
+            if !torchEnabled { setTorch(level: 0) }
+        }
+    }
+
+    private lazy var torchDevice: AVCaptureDevice? = {
+        guard let d = AVCaptureDevice.default(for: .video), d.hasTorch else { return nil }
+        return d
+    }()
+
+    private func setTorch(level: Float) {
+        guard let d = torchDevice else { return }
+        let clamped = max(0, min(1, level))
+        do {
+            try d.lockForConfiguration()
+            if clamped <= 0.01 {
+                if d.torchMode != .off { d.torchMode = .off }
+            } else {
+                try d.setTorchModeOn(level: clamped)
+            }
+            d.unlockForConfiguration()
+        } catch {
+            NSLog("[VoxelScanner] torch error: \(error)")
+        }
+    }
+
     private let sessionQueue = DispatchQueue(label: "voxelscanner.session")
     private let dataQueue = DispatchQueue(label: "voxelscanner.data")
 
@@ -180,6 +209,7 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     func stop() {
+        setTorch(level: 0)
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             if self.session.isRunning { self.session.stopRunning() }
@@ -528,6 +558,14 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                         }
                     }
                 }
+            }
+
+            // Drive rear torch brightness from spread (0 when pinched, 1 fully open).
+            if torchEnabled, palmC != nil {
+                let pinchedSpread: CGFloat = 0.06
+                let openSpread: CGFloat = 0.32
+                let t = max(0, min(1, (spreadV - pinchedSpread) / (openSpread - pinchedSpread)))
+                setTorch(level: Float(t))
             }
 
             DispatchQueue.main.async {
