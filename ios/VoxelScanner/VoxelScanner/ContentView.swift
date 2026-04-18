@@ -1,5 +1,7 @@
 import SwiftUI
 import UIKit
+import SceneKit
+import simd
 
 enum RangeMode: String, CaseIterable, Identifiable {
     case auto, manual, skeleton, orb, torch
@@ -99,6 +101,20 @@ struct ContentView: View {
                             Spacer()
                         }
                     }
+
+                    if mode != .torch {
+                        VStack {
+                            Spacer()
+                            HStack {
+                                Spacer()
+                                CaptureButton(busy: camera.isCapturing) {
+                                    camera.captureVoxels()
+                                }
+                                .padding(.trailing, 20)
+                                .padding(.bottom, 22)
+                            }
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -164,6 +180,11 @@ struct ContentView: View {
             applyMode(mode)
         }
         .onDisappear { camera.stop() }
+        .sheet(item: $camera.lastCapture) { capture in
+            VoxelPreviewSheet(capture: capture) {
+                camera.lastCapture = nil
+            }
+        }
     }
 
     private func applyMode(_ m: RangeMode) {
@@ -353,6 +374,214 @@ private struct TorchSlider: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
+}
+
+/// Circular shutter-style button. Shows a spinner while busy.
+private struct CaptureButton: View {
+    let busy: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Color.white.opacity(0.15))
+                    .frame(width: 76, height: 76)
+                    .overlay(
+                        Circle()
+                            .stroke(Color.white.opacity(0.9), lineWidth: 3)
+                    )
+                if busy {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                } else {
+                    Circle()
+                        .fill(Color.white)
+                        .frame(width: 60, height: 60)
+                }
+            }
+            .shadow(color: .black.opacity(0.5), radius: 8)
+        }
+        .disabled(busy)
+    }
+}
+
+/// Sheet presented after a capture. Shows the voxel point cloud, a summary,
+/// and a big Share button that writes rgb.jpg + depth_float32.bin +
+/// intrinsics.json into a zip compatible with the Three.js LOAD CAPTURE flow.
+private struct VoxelPreviewSheet: View {
+    let capture: VoxelCapture
+    let onDismiss: () -> Void
+    @State private var shareURL: URL?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(spacing: 0) {
+                VoxelSceneView(capture: capture)
+                    .ignoresSafeArea(edges: .top)
+
+                VStack(spacing: 10) {
+                    HStack {
+                        Text("\(capture.positions.count) voxels")
+                            .font(.caption.bold())
+                            .foregroundColor(.white)
+                        Spacer()
+                        let size = capture.bboxMax - capture.bboxMin
+                        Text(String(format: "%.1f × %.1f × %.1f cm",
+                                    size.x * 100, size.y * 100, size.z * 100))
+                            .font(.caption.monospacedDigit())
+                            .foregroundColor(.white.opacity(0.7))
+                    }
+
+                    HStack(spacing: 12) {
+                        Button(action: onDismiss) {
+                            Text("CLOSE")
+                                .font(.caption.bold())
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(Color.white.opacity(0.12))
+                                .cornerRadius(10)
+                        }
+                        Button(action: share) {
+                            HStack {
+                                Image(systemName: "square.and.arrow.up")
+                                Text("SHARE!")
+                                    .font(.caption.bold())
+                            }
+                            .foregroundColor(.black)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                            .background(Color.white)
+                            .cornerRadius(10)
+                        }
+                    }
+                }
+                .padding(16)
+                .background(Color.black)
+            }
+        }
+        .sheet(item: Binding(
+            get: { shareURL.map { ShareItem(url: $0) } },
+            set: { if $0 == nil { shareURL = nil } }
+        )) { item in
+            ShareSheet(items: [item.url])
+        }
+    }
+
+    private func share() {
+        shareURL = capture.writeSharePackage()
+    }
+}
+
+private struct ShareItem: Identifiable {
+    let url: URL
+    var id: String { url.absoluteString }
+}
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) { }
+}
+
+/// SceneKit 3D point cloud view. Uses the built-in camera controls so the user
+/// can pinch / rotate the cloud with one finger.
+private struct VoxelSceneView: UIViewRepresentable {
+    let capture: VoxelCapture
+
+    func makeUIView(context: Context) -> SCNView {
+        let v = SCNView()
+        v.backgroundColor = UIColor(white: 0.05, alpha: 1.0)
+        v.autoenablesDefaultLighting = true
+        v.allowsCameraControl = true
+        v.antialiasingMode = .multisampling4X
+
+        let scene = SCNScene()
+        v.scene = scene
+
+        // Centre the cloud on the origin so orbit-cam feels natural.
+        let centre = (capture.bboxMin + capture.bboxMax) * 0.5
+        let extent = simd_length(capture.bboxMax - capture.bboxMin)
+
+        // Build a single InstancedMesh-ish geometry by baking points into a
+        // SCNGeometry source with .point primitives.
+        if !capture.positions.isEmpty {
+            // Flip Y and Z to convert camera-space (Y down, Z forward) to
+            // SceneKit (Y up, -Z forward).
+            var verts: [SIMD3<Float>] = []
+            var cols: [SIMD3<Float>] = []
+            verts.reserveCapacity(capture.positions.count)
+            cols.reserveCapacity(capture.positions.count)
+            for i in 0..<capture.positions.count {
+                let p = capture.positions[i] - centre
+                verts.append(SIMD3<Float>(p.x, -p.y, -p.z))
+                let c = capture.colors[i]
+                cols.append(SIMD3<Float>(Float(c.x) / 255,
+                                         Float(c.y) / 255,
+                                         Float(c.z) / 255))
+            }
+
+            let posData = verts.withUnsafeBufferPointer { Data(buffer: $0) }
+            let colData = cols.withUnsafeBufferPointer { Data(buffer: $0) }
+            let posSource = SCNGeometrySource(
+                data: posData,
+                semantic: .vertex,
+                vectorCount: verts.count,
+                usesFloatComponents: true,
+                componentsPerVector: 3,
+                bytesPerComponent: MemoryLayout<Float>.size,
+                dataOffset: 0,
+                dataStride: MemoryLayout<SIMD3<Float>>.stride
+            )
+            let colSource = SCNGeometrySource(
+                data: colData,
+                semantic: .color,
+                vectorCount: cols.count,
+                usesFloatComponents: true,
+                componentsPerVector: 3,
+                bytesPerComponent: MemoryLayout<Float>.size,
+                dataOffset: 0,
+                dataStride: MemoryLayout<SIMD3<Float>>.stride
+            )
+
+            var indices: [Int32] = (0..<Int32(verts.count)).map { $0 }
+            let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+            let element = SCNGeometryElement(
+                data: indexData,
+                primitiveType: .point,
+                primitiveCount: verts.count,
+                bytesPerIndex: MemoryLayout<Int32>.size
+            )
+            element.pointSize = 4
+            element.minimumPointScreenSpaceRadius = 1.5
+            element.maximumPointScreenSpaceRadius = 6.0
+
+            let geo = SCNGeometry(sources: [posSource, colSource], elements: [element])
+            let node = SCNNode(geometry: geo)
+            scene.rootNode.addChildNode(node)
+        }
+
+        // Camera that looks at the centred cloud.
+        let cam = SCNCamera()
+        cam.zNear = 0.01
+        cam.zFar = 50
+        let camNode = SCNNode()
+        camNode.camera = cam
+        let d = max(0.25, extent * 1.6)
+        camNode.position = SCNVector3(0, 0, d)
+        camNode.look(at: SCNVector3(0, 0, 0))
+        scene.rootNode.addChildNode(camNode)
+        v.pointOfView = camNode
+
+        return v
+    }
+
+    func updateUIView(_ uiView: SCNView, context: Context) { }
 }
 
 /// Horizontal bar that fills with a rainbow gradient as `value` (0..1) rises.

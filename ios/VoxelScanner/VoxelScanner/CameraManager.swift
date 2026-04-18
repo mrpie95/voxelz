@@ -1,10 +1,12 @@
 import Foundation
 import AVFoundation
 import CoreVideo
+import CoreImage
 import UIKit
 import Combine
 import Vision
 import CoreHaptics
+import simd
 
 /// Depth-only TrueDepth manager. Emits a live grayscale UIImage of the
 /// current depth buffer plus (optionally auto-computed) min/max Z.
@@ -45,6 +47,10 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var palmForward: CGVector = .zero   // unit vector wrist → palm, in display-space
     @Published var fingerSpread: CGFloat = 0       // mean fingertip→palm distance (display units)
     @Published var palmZ: Float = 0                // meters
+
+    // Capture pipeline.
+    @Published var lastCapture: VoxelCapture? = nil
+    @Published var isCapturing: Bool = false
 
     /// Drive the rear torch brightness from the orb spread (0..1). The torch
     /// device is independent from the front TrueDepth session.
@@ -241,6 +247,10 @@ final class CameraManager: NSObject, ObservableObject {
             depthOutput.isFilteringEnabled = true
             depthOutput.setDelegate(self, callbackQueue: dataQueue)
             depthOutput.connection(with: .depthData)?.isEnabled = true
+            if let conn = depthOutput.connection(with: .depthData),
+               conn.isCameraIntrinsicMatrixDeliverySupported {
+                conn.isCameraIntrinsicMatrixDeliveryEnabled = true
+            }
 
             if session.canAddOutput(videoOutput) {
                 session.addOutput(videoOutput)
@@ -408,6 +418,60 @@ final class CameraManager: NSObject, ObservableObject {
         try? player.sendParameters([ip, sp], atTime: CHHapticTimeImmediate)
     }
 
+    // MARK: - Capture pipeline
+
+    /// Latest depth frame snapshot, captured each frame on dataQueue when
+    /// a capture is pending. Protected by captureLock.
+    private var pendingDepthSnap: DepthSnapshot?
+    /// Latest RGB CVPixelBuffer (retained while capture is pending).
+    private var pendingRGBBuffer: CVPixelBuffer?
+    private var captureRequested: Bool = false
+    private let captureLock = NSLock()
+
+    struct DepthSnapshot {
+        let values: [Float]
+        let width: Int
+        let height: Int
+        let intrinsics: simd_float3x3
+        let intrinsicsReferenceDims: CGSize
+    }
+
+    /// User taps the capture button. Next depth frame + next RGB frame are
+    /// snapshotted and voxelised on a background queue, result published to
+    /// `lastCapture`.
+    func captureVoxels() {
+        captureLock.lock()
+        captureRequested = true
+        pendingDepthSnap = nil
+        pendingRGBBuffer = nil
+        captureLock.unlock()
+        DispatchQueue.main.async { self.isCapturing = true }
+    }
+
+    private func tryFinishCapture() {
+        captureLock.lock()
+        guard captureRequested,
+              let depth = pendingDepthSnap,
+              let rgb = pendingRGBBuffer else {
+            captureLock.unlock()
+            return
+        }
+        captureRequested = false
+        pendingDepthSnap = nil
+        pendingRGBBuffer = nil
+        captureLock.unlock()
+
+        // Voxelise + JPEG encode on a background queue so we don't block the
+        // camera delegate queue.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let cap = VoxelCapture.build(depth: depth, rgb: rgb)
+            DispatchQueue.main.async {
+                self?.lastCapture = cap
+                self?.isCapturing = false
+            }
+        }
+    }
+
     // MARK: - Auto range
 
     /// Sample the depth buffer sparsely, then take robust percentiles:
@@ -567,6 +631,32 @@ extension CameraManager: AVCaptureDepthDataOutputDelegate {
 
         let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes, lo: lo, hi: hi)
 
+        // If a capture is pending, copy the full depth frame + intrinsics.
+        captureLock.lock()
+        let needDepthSnap = captureRequested && pendingDepthSnap == nil
+        captureLock.unlock()
+        if needDepthSnap {
+            var snap = [Float](repeating: 0, count: w * h)
+            snap.withUnsafeMutableBufferPointer { dst in
+                for v in 0..<h {
+                    let row = base.advanced(by: v * rowBytes).assumingMemoryBound(to: Float.self)
+                    for u in 0..<w { dst[v * w + u] = row[u] }
+                }
+            }
+            var intrinsics = matrix_identity_float3x3
+            var refDims = CGSize(width: CGFloat(w), height: CGFloat(h))
+            if let cal = depth.cameraCalibrationData {
+                intrinsics = cal.intrinsicMatrix
+                refDims = cal.intrinsicMatrixReferenceDimensions
+            }
+            captureLock.lock()
+            pendingDepthSnap = DepthSnapshot(values: snap, width: w, height: h,
+                                             intrinsics: intrinsics,
+                                             intrinsicsReferenceDims: refDims)
+            captureLock.unlock()
+            tryFinishCapture()
+        }
+
         // Snapshot depth values for the hand-Z sampler (cheap: 160x120 = 19,200 floats).
         if handMode {
             var snap = [Float](repeating: 0, count: w * h)
@@ -643,13 +733,236 @@ extension CameraManager {
     }
 }
 
+// MARK: - Voxel capture
+
+/// Result of a capture press: a point cloud plus the raw files needed by the
+/// Three.js `index.html` LOAD CAPTURE flow.
+struct VoxelCapture: Identifiable {
+    let id = UUID()
+    let positions: [SIMD3<Float>]   // meters, camera space (Y down, Z forward)
+    let colors: [SIMD3<UInt8>]       // per-voxel RGB 0..255
+    let voxelSize: Float
+    let bboxMin: SIMD3<Float>
+    let bboxMax: SIMD3<Float>
+
+    // Raw files, matching the web loader's folder format.
+    let rgbJpeg: Data
+    let depthFloat32: Data
+    let intrinsicsJson: Data
+
+    static func build(depth: CameraManager.DepthSnapshot, rgb: CVPixelBuffer) -> VoxelCapture {
+        // ---- JPEG-encode the RGB frame for sharing.
+        let (rgbJpeg, rgbW, rgbH, rgbPixels) = encodeRGB(rgb)
+
+        // ---- Intrinsics, rescaled from reference dims to depth dims.
+        let m = depth.intrinsics
+        let refW = Float(depth.intrinsicsReferenceDims.width)
+        let refH = Float(depth.intrinsicsReferenceDims.height)
+        let sX = Float(depth.width) / max(1, refW)
+        let sY = Float(depth.height) / max(1, refH)
+        let fx = m[0, 0] * sX
+        let fy = m[1, 1] * sY
+        let cx = m[2, 0] * sX
+        let cy = m[2, 1] * sY
+
+        // ---- Voxelise (matches index.html loadCapture to the millimetre).
+        let minZ: Float = 0.15
+        let maxZ: Float = 1.2
+        let voxelSize: Float = 0.004
+
+        struct Bin { var ix: Int; var iy: Int; var iz: Int; var r: Int; var g: Int; var b: Int; var n: Int }
+        var bins: [Int64: Bin] = [:]
+        bins.reserveCapacity(4096)
+
+        let rgbSX = Float(rgbW) / Float(depth.width)
+        let rgbSY = Float(rgbH) / Float(depth.height)
+        let dw = depth.width, dh = depth.height
+
+        depth.values.withUnsafeBufferPointer { depthPtr in
+            rgbPixels.withUnsafeBufferPointer { rgbPtr in
+                for v in 0..<dh {
+                    for u in 0..<dw {
+                        let z = depthPtr[v * dw + u]
+                        if !z.isFinite || z < minZ || z > maxZ { continue }
+                        let X = (Float(u) - cx) * z / fx
+                        let Y = (Float(v) - cy) * z / fy
+                        let ix = Int((X / voxelSize).rounded())
+                        let iy = Int((Y / voxelSize).rounded())
+                        let iz = Int((z / voxelSize).rounded())
+                        let ru = min(rgbW - 1, max(0, Int(Float(u) * rgbSX)))
+                        let rv = min(rgbH - 1, max(0, Int(Float(v) * rgbSY)))
+                        let p = (rv * rgbW + ru) * 4
+                        // BGRA layout from the video output.
+                        let b = Int(rgbPtr[p + 0])
+                        let g = Int(rgbPtr[p + 1])
+                        let r = Int(rgbPtr[p + 2])
+                        // Pack key: iz in top bits, iy in middle, ix in bottom.
+                        let key = (Int64(ix) & 0x1FFFFF)
+                                | ((Int64(iy) & 0x1FFFFF) << 21)
+                                | ((Int64(iz) & 0x1FFFFF) << 42)
+                        if var bin = bins[key] {
+                            bin.r += r; bin.g += g; bin.b += b; bin.n += 1
+                            bins[key] = bin
+                        } else {
+                            bins[key] = Bin(ix: ix, iy: iy, iz: iz, r: r, g: g, b: b, n: 1)
+                        }
+                    }
+                }
+            }
+        }
+
+        var positions: [SIMD3<Float>] = []
+        var colors: [SIMD3<UInt8>] = []
+        positions.reserveCapacity(bins.count)
+        colors.reserveCapacity(bins.count)
+        var mn = SIMD3<Float>(Float.greatestFiniteMagnitude,
+                              Float.greatestFiniteMagnitude,
+                              Float.greatestFiniteMagnitude)
+        var mx = SIMD3<Float>(-Float.greatestFiniteMagnitude,
+                              -Float.greatestFiniteMagnitude,
+                              -Float.greatestFiniteMagnitude)
+        for bin in bins.values {
+            let px = Float(bin.ix) * voxelSize
+            let py = Float(bin.iy) * voxelSize
+            let pz = Float(bin.iz) * voxelSize
+            let p = SIMD3<Float>(px, py, pz)
+            positions.append(p)
+            let denom = max(1, bin.n)
+            colors.append(SIMD3<UInt8>(UInt8(bin.r / denom),
+                                       UInt8(bin.g / denom),
+                                       UInt8(bin.b / denom)))
+            mn = simd_min(mn, p); mx = simd_max(mx, p)
+        }
+
+        // ---- Serialise raw depth as little-endian float32.
+        let depthFloat32 = depth.values.withUnsafeBufferPointer { Data(buffer: $0) }
+
+        // ---- Intrinsics JSON matching loadCapture().
+        let intr: [String: Any] = [
+            "depth_width": depth.width,
+            "depth_height": depth.height,
+            "rgb_width": rgbW,
+            "rgb_height": rgbH,
+            "intrinsic_matrix_reference_dimensions": [
+                Int(depth.intrinsicsReferenceDims.width),
+                Int(depth.intrinsicsReferenceDims.height)
+            ],
+            // Column-major, same as AVCameraCalibrationData.
+            "intrinsic_matrix": [
+                [m[0, 0], m[0, 1], m[0, 2]],
+                [m[1, 0], m[1, 1], m[1, 2]],
+                [m[2, 0], m[2, 1], m[2, 2]]
+            ]
+        ]
+        let intrJson = (try? JSONSerialization.data(withJSONObject: intr,
+                                                    options: [.prettyPrinted])) ?? Data()
+
+        return VoxelCapture(
+            positions: positions,
+            colors: colors,
+            voxelSize: voxelSize,
+            bboxMin: positions.isEmpty ? .zero : mn,
+            bboxMax: positions.isEmpty ? .zero : mx,
+            rgbJpeg: rgbJpeg,
+            depthFloat32: depthFloat32,
+            intrinsicsJson: intrJson
+        )
+    }
+
+    /// Write the three capture files to a temp folder and return a zip URL
+    /// suitable for UIActivityViewController.
+    func writeSharePackage() -> URL? {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("capture-\(Int(Date().timeIntervalSince1970))")
+        do {
+            try fm.createDirectory(at: base, withIntermediateDirectories: true)
+            try rgbJpeg.write(to: base.appendingPathComponent("rgb.jpg"))
+            try depthFloat32.write(to: base.appendingPathComponent("depth_float32.bin"))
+            try intrinsicsJson.write(to: base.appendingPathComponent("intrinsics.json"))
+        } catch {
+            NSLog("[VoxelScanner] capture write error: \(error)")
+            return nil
+        }
+        // NSFileCoordinator's .forUploading option zips the folder for us —
+        // the Apple-sanctioned way to bundle a directory on iOS.
+        var zipURL: URL?
+        var coordError: NSError?
+        let coord = NSFileCoordinator()
+        coord.coordinate(readingItemAt: base,
+                         options: [.forUploading],
+                         error: &coordError) { tempZip in
+            // Copy into a stable location so the URL stays valid after the block.
+            let dest = fm.temporaryDirectory
+                .appendingPathComponent("capture-\(Int(Date().timeIntervalSince1970)).zip")
+            try? fm.removeItem(at: dest)
+            do {
+                try fm.copyItem(at: tempZip, to: dest)
+                zipURL = dest
+            } catch {
+                NSLog("[VoxelScanner] zip copy error: \(error)")
+            }
+        }
+        if let coordError = coordError {
+            NSLog("[VoxelScanner] coord error: \(coordError)")
+        }
+        return zipURL
+    }
+
+    // MARK: - RGB helpers
+
+    private static func encodeRGB(_ pb: CVPixelBuffer) -> (Data, Int, Int, [UInt8]) {
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        let w = CVPixelBufferGetWidth(pb)
+        let h = CVPixelBufferGetHeight(pb)
+        let rowBytes = CVPixelBufferGetBytesPerRow(pb)
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        if let base = CVPixelBufferGetBaseAddress(pb) {
+            let src = base.assumingMemoryBound(to: UInt8.self)
+            for y in 0..<h {
+                let rowOffset = y * rowBytes
+                for x in 0..<(w * 4) {
+                    pixels[y * w * 4 + x] = src[rowOffset + x]
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+
+        // Encode to JPEG via CoreImage for sharing.
+        let ci = CIImage(cvPixelBuffer: pb)
+        // Front-camera video buffers arrive landscape + mirrored; apply the
+        // right transform so rgb.jpg looks upright for the downstream loader.
+        let oriented = ci.oriented(.leftMirrored)
+        let context = CIContext(options: nil)
+        var jpegData = Data()
+        if let cg = context.createCGImage(oriented, from: oriented.extent),
+           let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.85) {
+            jpegData = data
+        }
+        return (jpegData, w, h, pixels)
+    }
+}
+
 // MARK: - Video delegate (RGB → Vision hand pose)
 
 extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput,
                        didOutput sampleBuffer: CMSampleBuffer,
                        from connection: AVCaptureConnection) {
-        guard handMode, let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+        // If a capture was requested, retain the latest RGB buffer and try to
+        // finish (we need both depth + RGB snapshots).
+        captureLock.lock()
+        let needRGB = captureRequested && pendingRGBBuffer == nil
+        captureLock.unlock()
+        if needRGB {
+            captureLock.lock()
+            pendingRGBBuffer = pb
+            captureLock.unlock()
+            tryFinishCapture()
+        }
+
+        guard handMode else { return }
 
         // TrueDepth front camera, device in portrait: buffer native orientation
         // is landscape-right AND mirrored (selfie). `.leftMirrored` tells Vision
