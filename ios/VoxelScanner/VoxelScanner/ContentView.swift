@@ -2,7 +2,7 @@ import SwiftUI
 import UIKit
 
 enum RangeMode: String, CaseIterable, Identifiable {
-    case auto, manual, skeleton, orb
+    case auto, manual, skeleton, orb, torch
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -10,15 +10,18 @@ enum RangeMode: String, CaseIterable, Identifiable {
         case .manual: return "MANUAL"
         case .skeleton: return "SKEL"
         case .orb: return "ORB"
+        case .torch: return "TORCH"
         }
     }
     var needsHand: Bool { self == .skeleton || self == .orb }
+    var needsDepth: Bool { self != .torch }
 }
 
 struct ContentView: View {
     @StateObject private var camera = CameraManager()
     @State private var mode: RangeMode = .auto
     @State private var optHue = true
+    @State private var torchLevel: Float = 0
 
     init() {
         // Segmented picker text was black-on-black; force legible colours.
@@ -39,7 +42,9 @@ struct ContentView: View {
 
             VStack(spacing: 0) {
                 ZStack {
-                    if let img = camera.depthImage {
+                    if mode == .torch {
+                        TorchPanel(level: torchLevel)
+                    } else if let img = camera.depthImage {
                         Image(uiImage: img)
                             .resizable()
                             .interpolation(.none)
@@ -126,7 +131,10 @@ struct ContentView: View {
                     if mode == .orb {
                         HStack(spacing: 16) {
                             ToggleChip(label: "HUE", on: $optHue)
-                            ToggleChip(label: "TORCH", on: $camera.torchEnabled)
+                        }
+                    } else if mode == .torch {
+                        TorchSlider(level: $torchLevel) { v in
+                            camera.setTorchBrightness(v)
                         }
                     } else if mode == .skeleton {
                         Text("21 joints per hand · up to 2 hands")
@@ -158,6 +166,21 @@ struct ContentView: View {
     }
 
     private func applyMode(_ m: RangeMode) {
+        // Torch mode stops the camera session entirely. Running it while the
+        // TrueDepth session is live throws CMIO "device is busy" (-17281) and
+        // takes the depth feed down with it — so we surrender the session
+        // when the user opens the torch tab, and restart it on the way out.
+        if m == .torch {
+            camera.handMode = false
+            camera.stop()
+            return
+        } else {
+            camera.torchEnabled = false
+            camera.setTorchBrightness(0)
+            torchLevel = 0
+            if !camera.isRunning { camera.start() }
+        }
+
         switch m {
         case .auto:
             camera.autoMode = true
@@ -170,8 +193,9 @@ struct ContentView: View {
             camera.autoMode = true
             camera.handMode = true
             camera.recalibrateAuto()
+        case .torch:
+            break
         }
-        if m != .orb { camera.torchEnabled = false }
     }
 }
 
@@ -268,6 +292,63 @@ private struct PalmOrb: View {
                 .animation(.easeOut(duration: 0.12), value: spread)
                 .animation(.easeOut(duration: 0.15), value: palmZ)
             }
+        }
+    }
+}
+
+/// Full-bleed "torch is on" visual for the TORCH tab. Brightness scales with
+/// the slider so you get on-screen feedback even before the LED kicks in.
+private struct TorchPanel: View {
+    let level: Float
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            RadialGradient(
+                colors: [
+                    Color(red: 1.0, green: 0.95, blue: 0.8).opacity(0.9 * Double(level)),
+                    Color.clear
+                ],
+                center: .center,
+                startRadius: 20,
+                endRadius: 400
+            )
+            VStack(spacing: 14) {
+                Image(systemName: level > 0.05 ? "flashlight.on.fill" : "flashlight.off.fill")
+                    .font(.system(size: 72, weight: .regular))
+                    .foregroundColor(Color.yellow.opacity(0.9))
+                    .shadow(color: Color.yellow.opacity(0.8 * Double(level)), radius: 30)
+                Text("\(Int(level * 100))%")
+                    .font(.system(size: 44, weight: .bold).monospacedDigit())
+                    .foregroundColor(.white.opacity(0.9))
+            }
+        }
+    }
+}
+
+/// Big slider for the TORCH tab. Debounced outward via the onChange callback.
+private struct TorchSlider: View {
+    @Binding var level: Float
+    let onChange: (Float) -> Void
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Text("TORCH")
+                    .font(.caption.bold())
+                    .foregroundColor(.white)
+                Spacer()
+                Text("\(Int(level * 100))%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.white.opacity(0.8))
+            }
+            Slider(value: $level, in: 0...1)
+                .tint(.yellow)
+                .onChange(of: level) { _, newValue in
+                    onChange(newValue)
+                }
+            Text("Depth feed is paused while TORCH is active")
+                .font(.caption2)
+                .foregroundColor(.white.opacity(0.5))
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

@@ -77,6 +77,11 @@ final class CameraManager: NSObject, ObservableObject {
         return best
     }
 
+    /// Public entry point for the Torch tab's slider.
+    func setTorchBrightness(_ level: Float) {
+        setTorch(level: level)
+    }
+
     private func setTorch(level: Float) {
         let raw = max(0, min(1, level))
         let target = quantiseTorchLevel(raw)
