@@ -200,26 +200,13 @@ private struct PinchProjectedShape: View {
                     return 0.9 + (0.8 - clamped) / 0.65 * 0.25
                 }()
 
+                // Float the cube above the fingers so they don't block it.
+                // Offset scales with cube size so it always sits just above the grip.
+                let offsetPx = side * 0.75
                 let cx = mid.x * geo.size.width
-                let cy = mid.y * geo.size.height
+                let cy = mid.y * geo.size.height - offsetPx
 
-                RoundedRectangle(cornerRadius: side * 0.18)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(hue: hue, saturation: 1.0, brightness: brightness),
-                                Color(hue: (hue + 0.15).truncatingRemainder(dividingBy: 1),
-                                      saturation: 1.0, brightness: brightness * 0.7)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: side * 0.18)
-                            .stroke(Color.white.opacity(0.9), lineWidth: 2)
-                    )
-                    .frame(width: side, height: side)
+                NeonCube(side: side, hue: hue, brightness: brightness)
                     .scaleEffect(popScale)
                     .rotationEffect(.degrees(roll))
                     .shadow(color: Color(hue: hue, saturation: 1, brightness: 1)
@@ -231,6 +218,86 @@ private struct PinchProjectedShape: View {
                     .animation(.easeOut(duration: 0.15), value: pinchZ)
             }
         }
+    }
+}
+
+/// A 2.5D cube illusion: back face offset up-right, 4 connecting edges, bright
+/// front face on top. Reads as a solid 3D cube without a real renderer.
+private struct NeonCube: View {
+    let side: CGFloat
+    let hue: Double
+    let brightness: Double
+
+    var body: some View {
+        let depth = side * 0.28
+        let boxW = side + depth
+        let boxH = side + depth
+        let corner = side * 0.12
+
+        ZStack {
+            // Back face (dimmer, offset up-right).
+            RoundedRectangle(cornerRadius: corner)
+                .fill(Color(hue: hue, saturation: 1, brightness: brightness * 0.55))
+                .frame(width: side, height: side)
+                .offset(x: depth / 2, y: -depth / 2)
+
+            // Connecting edges.
+            CubeEdges(side: side, depth: depth)
+                .stroke(Color.white.opacity(0.75), lineWidth: 1.5)
+                .frame(width: boxW, height: boxH)
+
+            // Front face on top.
+            RoundedRectangle(cornerRadius: corner)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color(hue: hue, saturation: 1.0, brightness: brightness),
+                            Color(hue: (hue + 0.15).truncatingRemainder(dividingBy: 1),
+                                  saturation: 1.0, brightness: brightness * 0.7)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: corner)
+                        .stroke(Color.white.opacity(0.9), lineWidth: 2)
+                )
+                .frame(width: side, height: side)
+                .offset(x: -depth / 2, y: depth / 2)
+        }
+        .frame(width: boxW, height: boxH)
+    }
+}
+
+private struct CubeEdges: Shape {
+    let side: CGFloat
+    let depth: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        // Front face centred at (-d/2, +d/2) relative to rect centre.
+        let cx = rect.midX, cy = rect.midY
+        let s2 = side / 2
+        let d2 = depth / 2
+        let frontC = CGPoint(x: cx - d2, y: cy + d2)
+        let backC  = CGPoint(x: cx + d2, y: cy - d2)
+
+        let fTL = CGPoint(x: frontC.x - s2, y: frontC.y - s2)
+        let fTR = CGPoint(x: frontC.x + s2, y: frontC.y - s2)
+        let fBL = CGPoint(x: frontC.x - s2, y: frontC.y + s2)
+        let fBR = CGPoint(x: frontC.x + s2, y: frontC.y + s2)
+
+        let bTL = CGPoint(x: backC.x - s2, y: backC.y - s2)
+        let bTR = CGPoint(x: backC.x + s2, y: backC.y - s2)
+        let bBL = CGPoint(x: backC.x - s2, y: backC.y + s2)
+        let bBR = CGPoint(x: backC.x + s2, y: backC.y + s2)
+
+        for (a, b) in [(fTL, bTL), (fTR, bTR), (fBL, bBL), (fBR, bBR)] {
+            p.move(to: a)
+            p.addLine(to: b)
+        }
+        return p
     }
 }
 
