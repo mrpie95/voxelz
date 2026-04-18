@@ -54,23 +54,45 @@ final class CameraManager: NSObject, ObservableObject {
     }
 
     private lazy var torchDevice: AVCaptureDevice? = {
-        guard let d = AVCaptureDevice.default(for: .video), d.hasTorch else { return nil }
-        return d
+        // Be explicit about the rear wide camera — `default(for: .video)` can
+        // otherwise resolve to the front TrueDepth device which has no torch.
+        if let d = AVCaptureDevice.default(.builtInWideAngleCamera,
+                                           for: .video, position: .back), d.hasTorch {
+            return d
+        }
+        if let d = AVCaptureDevice.default(for: .video), d.hasTorch { return d }
+        return nil
     }()
 
+    private let torchQueue = DispatchQueue(label: "voxelscanner.torch")
+    private var lastTorchLevel: Float = -1
+    private var lastTorchStamp: CFTimeInterval = 0
+
     private func setTorch(level: Float) {
-        guard let d = torchDevice else { return }
         let clamped = max(0, min(1, level))
-        do {
-            try d.lockForConfiguration()
-            if clamped <= 0.01 {
-                if d.torchMode != .off { d.torchMode = .off }
-            } else {
-                try d.setTorchModeOn(level: clamped)
+        // Throttle: only actually touch the hardware if the level moved enough
+        // or enough time has passed. Calling lockForConfiguration/setTorchModeOn
+        // at 15+ Hz can deadlock AVFoundation.
+        let now = CACurrentMediaTime()
+        let delta = abs(clamped - lastTorchLevel)
+        let timeDelta = now - lastTorchStamp
+        if lastTorchLevel >= 0 && delta < 0.04 && timeDelta < 0.15 { return }
+        lastTorchLevel = clamped
+        lastTorchStamp = now
+
+        torchQueue.async { [weak self] in
+            guard let self = self, let d = self.torchDevice else { return }
+            do {
+                try d.lockForConfiguration()
+                if clamped <= 0.01 {
+                    if d.torchMode != .off { d.torchMode = .off }
+                } else {
+                    try d.setTorchModeOn(level: max(0.01, clamped))
+                }
+                d.unlockForConfiguration()
+            } catch {
+                NSLog("[VoxelScanner] torch error: \(error)")
             }
-            d.unlockForConfiguration()
-        } catch {
-            NSLog("[VoxelScanner] torch error: \(error)")
         }
     }
 
