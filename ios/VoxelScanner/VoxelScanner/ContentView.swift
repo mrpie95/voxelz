@@ -557,9 +557,13 @@ private struct VoxelSceneView: UIViewRepresentable {
                 primitiveCount: verts.count,
                 bytesPerIndex: MemoryLayout<Int32>.size
             )
-            element.pointSize = 8
-            element.minimumPointScreenSpaceRadius = 3.0
-            element.maximumPointScreenSpaceRadius = 12.0
+            // pointSize is in world units (metres). Voxels are 4 mm, so this
+            // renders each splat at the voxel's true physical size. The
+            // screen-space clamp is widened so SceneKit actually lets the
+            // projection scale with zoom instead of pinning to a narrow band.
+            element.pointSize = 0.004
+            element.minimumPointScreenSpaceRadius = 0.5
+            element.maximumPointScreenSpaceRadius = 200.0
 
             let geo = SCNGeometry(sources: [posSource, colSource], elements: [element])
             // Points have no normals → default Blinn/Phong shading returns 0
