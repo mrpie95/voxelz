@@ -53,56 +53,86 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private lazy var torchDevice: AVCaptureDevice? = {
-        // Be explicit about the rear wide camera — `default(for: .video)` can
-        // otherwise resolve to the front TrueDepth device which has no torch.
-        if let d = AVCaptureDevice.default(.builtInWideAngleCamera,
-                                           for: .video, position: .back), d.hasTorch {
-            return d
-        }
-        if let d = AVCaptureDevice.default(for: .video), d.hasTorch { return d }
-        return nil
-    }()
+    // Eagerly resolved in init() so we don't race on the Swift `lazy` machinery
+    // from multiple queues. Read-only after init.
+    private var torchDevice: AVCaptureDevice?
 
     private let torchQueue = DispatchQueue(label: "voxelscanner.torch")
-    private var lastTorchLevel: Float = -1
-    private var lastTorchStamp: CFTimeInterval = 0
+    private var torchQueuedLevel: Float = 0      // only mutated on torchQueue
+    private var torchAppliedLevel: Float = -1    // ditto
+    private var torchLastApplyStamp: CFTimeInterval = 0
     private var torchHoldingLock: Bool = false
 
-    private func setTorch(level: Float) {
-        let clamped = max(0, min(1, level))
-        let now = CACurrentMediaTime()
-        let delta = abs(clamped - lastTorchLevel)
-        let timeDelta = now - lastTorchStamp
-        if lastTorchLevel >= 0 && delta < 0.04 && timeDelta < 0.15 { return }
-        lastTorchLevel = clamped
-        lastTorchStamp = now
+    /// Quantise to 6 steps so tiny finger jitter doesn't cause a fresh hardware
+    /// write. The front TrueDepth session + concurrent rear torch writes are a
+    /// stress path for AVFoundation — fewer writes = fewer crashes.
+    private func quantiseTorchLevel(_ l: Float) -> Float {
+        let steps: [Float] = [0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        var best = steps[0]
+        var bestD = Float.greatestFiniteMagnitude
+        for s in steps {
+            let d = abs(s - l)
+            if d < bestD { bestD = d; best = s }
+        }
+        return best
+    }
 
+    private func setTorch(level: Float) {
+        let raw = max(0, min(1, level))
+        let target = quantiseTorchLevel(raw)
         torchQueue.async { [weak self] in
-            guard let self = self, let d = self.torchDevice else { return }
-            do {
-                if clamped <= 0.01 {
-                    // Fully off — release the lock so other apps/tools can use the camera.
-                    if self.torchHoldingLock {
-                        try? d.lockForConfiguration()
-                        if d.torchMode != .off { d.torchMode = .off }
-                        d.unlockForConfiguration()
-                        self.torchHoldingLock = false
-                    }
-                    return
-                }
-                // Lock once on the first "on" write and keep the lock while active.
-                if !self.torchHoldingLock {
-                    try d.lockForConfiguration()
-                    self.torchHoldingLock = true
-                }
-                try d.setTorchModeOn(level: max(0.01, clamped))
-            } catch {
-                NSLog("[VoxelScanner] torch error: \(error)")
-                if self.torchHoldingLock {
+            guard let self = self else { return }
+            self.torchQueuedLevel = target
+            self.applyTorchIfNeeded()
+        }
+    }
+
+    /// Must run on torchQueue. Applies the queued level if it has changed and
+    /// at least 200ms have passed since the last hardware write.
+    private func applyTorchIfNeeded() {
+        guard let d = torchDevice else { return }
+        let now = CACurrentMediaTime()
+        let target = torchQueuedLevel
+        if target == torchAppliedLevel { return }
+        if now - torchLastApplyStamp < 0.2 {
+            // Too soon since last write; schedule a trailing apply.
+            torchQueue.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                self?.applyTorchIfNeeded()
+            }
+            return
+        }
+        torchLastApplyStamp = now
+
+        // Defensive: bail if the torch isn't currently available (e.g. thermal).
+        if !d.isTorchAvailable {
+            NSLog("[VoxelScanner] torch unavailable — skipping write")
+            return
+        }
+
+        do {
+            if target <= 0.01 {
+                if torchHoldingLock {
+                    if d.torchMode != .off { d.torchMode = .off }
                     d.unlockForConfiguration()
-                    self.torchHoldingLock = false
+                    torchHoldingLock = false
+                } else {
+                    try d.lockForConfiguration()
+                    if d.torchMode != .off { d.torchMode = .off }
+                    d.unlockForConfiguration()
                 }
+            } else {
+                if !torchHoldingLock {
+                    try d.lockForConfiguration()
+                    torchHoldingLock = true
+                }
+                try d.setTorchModeOn(level: max(0.01, target))
+            }
+            torchAppliedLevel = target
+        } catch {
+            NSLog("[VoxelScanner] torch apply error: \(error)")
+            if torchHoldingLock {
+                d.unlockForConfiguration()
+                torchHoldingLock = false
             }
         }
     }
@@ -150,6 +180,16 @@ final class CameraManager: NSObject, ObservableObject {
 
     override init() {
         super.init()
+        // Resolve torch device once, on init, on the calling thread (main).
+        // Avoids a Swift lazy-var race when setTorch is first called from
+        // different queues concurrently.
+        if let d = AVCaptureDevice.default(.builtInWideAngleCamera,
+                                           for: .video, position: .back),
+           d.hasTorch {
+            self.torchDevice = d
+        } else if let d = AVCaptureDevice.default(for: .video), d.hasTorch {
+            self.torchDevice = d
+        }
         sessionQueue.async { [weak self] in self?.configure() }
     }
 
