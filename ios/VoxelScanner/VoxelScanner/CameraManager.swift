@@ -4,6 +4,7 @@ import CoreVideo
 import UIKit
 import Combine
 import Vision
+import CoreHaptics
 
 /// Depth-only TrueDepth manager. Emits a live grayscale UIImage of the
 /// current depth buffer plus (optionally auto-computed) min/max Z.
@@ -50,6 +51,13 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var torchEnabled: Bool = false {
         didSet {
             if !torchEnabled { setTorch(level: 0) }
+        }
+    }
+
+    /// Drive a continuous CoreHaptics buzz from orb spread + hand depth.
+    @Published var hapticsEnabled: Bool = false {
+        didSet {
+            if hapticsEnabled { startHaptics() } else { stopHaptics() }
         }
     }
 
@@ -288,6 +296,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     func stop() {
         setTorch(level: 0)
+        stopHaptics()
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             if self.session.isRunning { self.session.stopRunning() }
@@ -301,6 +310,77 @@ final class CameraManager: NSObject, ObservableObject {
         case .notDetermined: AVCaptureDevice.requestAccess(for: .video) { completion($0) }
         default: completion(false)
         }
+    }
+
+    // MARK: - Haptics
+
+    private var hapticEngine: CHHapticEngine?
+    private var hapticPlayer: CHHapticAdvancedPatternPlayer?
+
+    private func startHaptics() {
+        guard CHHapticEngine.capabilitiesForHardware().supportsHaptics else {
+            NSLog("[VoxelScanner] haptics unsupported on this device")
+            return
+        }
+        do {
+            if hapticEngine == nil {
+                let engine = try CHHapticEngine()
+                engine.playsHapticsOnly = true
+                engine.isAutoShutdownEnabled = false
+                engine.resetHandler = { [weak self] in
+                    guard let self = self else { return }
+                    try? self.hapticEngine?.start()
+                    self.rebuildHapticPlayer()
+                    try? self.hapticPlayer?.start(atTime: CHHapticTimeImmediate)
+                }
+                engine.stoppedHandler = { reason in
+                    NSLog("[VoxelScanner] haptic engine stopped: \(reason.rawValue)")
+                }
+                hapticEngine = engine
+            }
+            try hapticEngine?.start()
+            rebuildHapticPlayer()
+            try hapticPlayer?.start(atTime: CHHapticTimeImmediate)
+        } catch {
+            NSLog("[VoxelScanner] haptic start error: \(error)")
+        }
+    }
+
+    private func rebuildHapticPlayer() {
+        do {
+            let intensity = CHHapticEventParameter(parameterID: .hapticIntensity, value: 0.0)
+            let sharpness = CHHapticEventParameter(parameterID: .hapticSharpness, value: 0.5)
+            // One long continuous event we modulate via dynamic parameters.
+            let event = CHHapticEvent(eventType: .hapticContinuous,
+                                      parameters: [intensity, sharpness],
+                                      relativeTime: 0,
+                                      duration: 60 * 60)  // 1 hour
+            let pattern = try CHHapticPattern(events: [event], parameters: [])
+            hapticPlayer = try hapticEngine?.makeAdvancedPlayer(with: pattern)
+            hapticPlayer?.loopEnabled = true
+        } catch {
+            NSLog("[VoxelScanner] haptic pattern error: \(error)")
+        }
+    }
+
+    private func stopHaptics() {
+        try? hapticPlayer?.stop(atTime: CHHapticTimeImmediate)
+        hapticPlayer = nil
+        hapticEngine?.stop(completionHandler: nil)
+    }
+
+    /// Modulate the live haptic event. Values are clamped to [0, 1].
+    fileprivate func updateHaptics(intensity: Float, sharpness: Float) {
+        guard let player = hapticPlayer else { return }
+        let i = max(0, min(1, intensity))
+        let s = max(0, min(1, sharpness))
+        let ip = CHHapticDynamicParameter(parameterID: .hapticIntensityControl,
+                                          value: i,
+                                          relativeTime: 0)
+        let sp = CHHapticDynamicParameter(parameterID: .hapticSharpnessControl,
+                                          value: s,
+                                          relativeTime: 0)
+        try? player.sendParameters([ip, sp], atTime: CHHapticTimeImmediate)
     }
 
     // MARK: - Auto range
@@ -638,12 +718,24 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                 }
             }
 
-            // Drive rear torch brightness from spread (0 when pinched, 1 fully open).
+            // Normalised spread used by both torch + haptics drivers.
+            let pinchedSpread: CGFloat = 0.06
+            let openSpread: CGFloat = 0.32
+            let spreadT: CGFloat = palmC != nil
+                ? max(0, min(1, (spreadV - pinchedSpread) / (openSpread - pinchedSpread)))
+                : 0
+
             if torchEnabled, palmC != nil {
-                let pinchedSpread: CGFloat = 0.06
-                let openSpread: CGFloat = 0.32
-                let t = max(0, min(1, (spreadV - pinchedSpread) / (openSpread - pinchedSpread)))
-                setTorch(level: Float(t))
+                setTorch(level: Float(spreadT))
+            }
+
+            if hapticsEnabled {
+                // Intensity = spread (0 pinched → 1 open).
+                // Sharpness = closeness (closer hand → sharper click).
+                let z = palmZv > 0 ? palmZv : 0.4
+                let zClamped = max(0.15, min(0.6, z))
+                let sharpness = Float(1 - (CGFloat(zClamped) - 0.15) / 0.45)
+                updateHaptics(intensity: Float(spreadT), sharpness: sharpness)
             }
 
             DispatchQueue.main.async {

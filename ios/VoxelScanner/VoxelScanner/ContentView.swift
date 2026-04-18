@@ -131,6 +131,7 @@ struct ContentView: View {
                     if mode == .orb {
                         HStack(spacing: 16) {
                             ToggleChip(label: "HUE", on: $optHue)
+                            ToggleChip(label: "HAPTIC", on: $camera.hapticsEnabled)
                         }
                     } else if mode == .torch {
                         TorchSlider(level: $torchLevel) { v in
@@ -178,6 +179,7 @@ struct ContentView: View {
             camera.torchEnabled = false
             camera.setTorchBrightness(0)
             torchLevel = 0
+            if m != .orb { camera.hapticsEnabled = false }
             if !camera.isRunning { camera.start() }
         }
 
