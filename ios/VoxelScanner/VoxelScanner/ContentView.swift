@@ -17,8 +17,59 @@ enum RangeMode: String, CaseIterable, Identifiable {
         case .torch: return "TORCH"
         }
     }
+    var subtitle: String {
+        switch self {
+        case .auto: return "auto range"
+        case .manual: return "manual range"
+        case .live: return "live voxel cloud"
+        case .skeleton: return "hand skeleton"
+        case .orb: return "palm orb"
+        case .torch: return "rear torch"
+        }
+    }
+    var sfSymbol: String {
+        switch self {
+        case .auto: return "wand.and.stars"
+        case .manual: return "slider.horizontal.3"
+        case .live: return "cube.transparent"
+        case .skeleton: return "hand.raised"
+        case .orb: return "circle.hexagongrid"
+        case .torch: return "flashlight.on.fill"
+        }
+    }
+    var blurb: String {
+        switch self {
+        case .auto: return "Depth range tracks the scene automatically."
+        case .manual: return "Drag sliders to set the Z window by hand."
+        case .live: return "Real-time voxel cloud you can orbit in 3D."
+        case .skeleton: return "Vision detects 21 joints on up to 2 hands."
+        case .orb: return "Neon orb grows as you open your palm."
+        case .torch: return "Rear flashlight slider. Pauses depth."
+        }
+    }
     var needsHand: Bool { self == .skeleton || self == .orb }
     var needsDepth: Bool { self != .torch }
+}
+
+// MARK: - Theme
+
+enum Theme {
+    static let bg      = Color(red: 0x1C/255, green: 0x15/255, blue: 0x12/255)
+    static let bgDeep  = Color(red: 0x12/255, green: 0x0D/255, blue: 0x0B/255)
+    static let surface = Color(red: 0x2A/255, green: 0x20/255, blue: 0x1B/255)
+    static let surfaceHi = Color(red: 0x35/255, green: 0x28/255, blue: 0x22/255)
+    static let ivory   = Color(red: 0xF5/255, green: 0xEF/255, blue: 0xE6/255)
+    static let muted   = Color(red: 0xC8/255, green: 0xB5/255, blue: 0xA5/255)
+    static let salmon  = Color(red: 0xEA/255, green: 0xAC/255, blue: 0xB2/255)
+    static let orange  = Color(red: 0xDD/255, green: 0x95/255, blue: 0x6B/255)
+    static let sage    = Color(red: 0xA2/255, green: 0xC0/255, blue: 0xA7/255)
+}
+
+private extension Text {
+    func monoCap(size: CGFloat = 11) -> Text {
+        self.font(.system(size: size, weight: .medium, design: .monospaced))
+            .tracking(1.3)
+    }
 }
 
 struct ContentView: View {
@@ -27,177 +78,128 @@ struct ContentView: View {
     @State private var optHue = true
     @State private var torchLevel: Float = 0
 
-    init() {
-        // Segmented picker text was black-on-black; force legible colours.
-        let appearance = UISegmentedControl.appearance()
-        appearance.setTitleTextAttributes(
-            [.foregroundColor: UIColor.white.withAlphaComponent(0.7),
-             .font: UIFont.boldSystemFont(ofSize: 12)], for: .normal)
-        appearance.setTitleTextAttributes(
-            [.foregroundColor: UIColor.white,
-             .font: UIFont.boldSystemFont(ofSize: 12)], for: .selected)
-        appearance.selectedSegmentTintColor = UIColor(white: 0.32, alpha: 1.0)
-        appearance.backgroundColor = UIColor(white: 0.10, alpha: 1.0)
-    }
+    @State private var modeSheet = false
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
+        ZStack(alignment: .top) {
+            // Full-bleed mocha background with subtle gradient.
+            LinearGradient(
+                colors: [Theme.bg, Theme.bgDeep],
+                startPoint: .top, endPoint: .bottom
+            )
+            .ignoresSafeArea()
+
+            // Mode-specific viz fills the screen.
+            vizArea
+                .ignoresSafeArea(edges: [.horizontal, .bottom])
 
             VStack(spacing: 0) {
-                ZStack {
-                    if mode == .torch {
-                        TorchPanel(level: torchLevel)
-                    } else if mode == .live {
-                        LiveVoxelView(cloud: camera.liveCloud)
-                            .ignoresSafeArea(edges: .horizontal)
-                    } else if let img = camera.depthImage {
-                        Image(uiImage: img)
-                            .resizable()
-                            .interpolation(.none)
-                            .scaledToFit()
-                            .overlay(
-                                Group {
-                                    if mode == .skeleton {
-                                        Canvas { ctx, size in
-                                            for hand in camera.hands {
-                                                for p in hand {
-                                                    let c = CGPoint(x: p.x * size.width,
-                                                                    y: p.y * size.height)
-                                                    let r: CGFloat = 5
-                                                    let rect = CGRect(x: c.x - r, y: c.y - r,
-                                                                      width: r * 2, height: r * 2)
-                                                    ctx.fill(Path(ellipseIn: rect),
-                                                             with: .color(.green))
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            )
-                    } else {
-                        Text("Waiting for depth…")
-                            .foregroundColor(.white.opacity(0.6))
-                    }
-
-                    if mode == .orb {
-                        PalmOrb(
-                            palm: camera.palmCenter,
-                            forward: camera.palmForward,
-                            spread: camera.fingerSpread,
-                            palmZ: camera.palmZ,
-                            hueEnabled: optHue
-                        )
-                        .allowsHitTesting(false)
-                    }
-
-                    if camera.isCalibrating {
-                        BeachballSpinner()
-                            .frame(width: 64, height: 64)
-                            .shadow(color: .black.opacity(0.6), radius: 6)
-                    }
-
-                    if mode == .skeleton || mode == .orb {
-                        VStack {
-                            PinchMeter(value: min(max(camera.pinch / 0.35, 0), 1))
-                                .frame(height: 22)
-                                .padding(.horizontal, 16)
-                                .padding(.top, 12)
-                            Spacer()
-                        }
-                    }
-
-                    if mode != .torch {
-                        VStack {
-                            Spacer()
-                            HStack {
-                                Spacer()
-                                CaptureButton(busy: camera.isCapturing) {
-                                    camera.captureVoxels()
-                                }
-                                .padding(.trailing, 20)
-                                .padding(.bottom, 22)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                VStack(spacing: 12) {
-                    HStack {
-                        Text(camera.statusMessage ?? "—")
-                            .font(.caption)
-                            .foregroundColor(.white.opacity(0.8))
-                        Spacer()
-                        Text("\(camera.depthFPS) fps")
-                            .font(.caption.monospacedDigit())
-                            .foregroundColor(.white.opacity(0.8))
-                    }
-
-                    HStack(spacing: 12) {
-                        Text("MODE")
-                            .font(.caption.bold())
-                            .foregroundColor(.white)
-                        Picker("Mode", selection: $mode) {
-                            ForEach(RangeMode.allCases) { m in
-                                Text(m.title).tag(m)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .onChange(of: mode) { _, newValue in
-                            applyMode(newValue)
-                        }
-                    }
-
-                    if mode == .orb {
-                        HStack(spacing: 16) {
-                            ToggleChip(label: "HUE", on: $optHue)
-                            ToggleChip(label: "HAPTIC", on: $camera.hapticsEnabled)
-                        }
-                    } else if mode == .torch {
-                        TorchSlider(level: $torchLevel) { v in
-                            camera.setTorchBrightness(v)
-                        }
-                    } else if mode == .skeleton {
-                        Text("21 joints per hand · up to 2 hands")
-                            .font(.caption)
-                            .foregroundColor(.white.opacity(0.6))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        SliderRow(label: "MIN Z",
-                                  value: $camera.minZ,
-                                  range: 0.05...2.0,
-                                  format: "%.2f m",
-                                  enabled: mode == .manual)
-                        SliderRow(label: "MAX Z",
-                                  value: $camera.maxZ,
-                                  range: 0.05...2.0,
-                                  format: "%.2f m",
-                                  enabled: mode == .manual)
-                    }
-                }
-                .padding(16)
-                .background(Color.black)
+                TopBar(
+                    eyebrow: "TODAY",
+                    title: nowDateString(),
+                    trailing: { modeSheet = true }
+                )
+                Spacer()
+                BottomPanel(
+                    mode: mode,
+                    camera: camera,
+                    torchLevel: $torchLevel,
+                    optHue: $optHue,
+                    onCapture: { camera.captureVoxels() }
+                )
             }
         }
+        .preferredColorScheme(.dark)
         .onAppear {
             camera.start()
             applyMode(mode)
         }
         .onDisappear { camera.stop() }
+        .sheet(isPresented: $modeSheet) {
+            ModeSheet(
+                mode: $mode,
+                onSelect: { newMode in
+                    mode = newMode
+                    applyMode(newMode)
+                    modeSheet = false
+                }
+            )
+            .presentationDetents([.medium, .large])
+            .presentationDragIndicator(.visible)
+            .presentationBackground(Theme.bg)
+        }
         .sheet(item: $camera.lastCapture) { capture in
             VoxelPreviewSheet(capture: capture) {
                 camera.lastCapture = nil
             }
         }
         .background(
-            // Volume-up / volume-down become shutter triggers in any capture-
-            // capable mode. Uses AVCaptureEventInteraction (iOS 17.2+).
             VolumeCaptureTrigger(enabled: mode != .torch) {
                 camera.captureVoxels()
             }
             .allowsHitTesting(false)
         )
+    }
+
+    @ViewBuilder
+    private var vizArea: some View {
+        if mode == .torch {
+            TorchPanel(level: torchLevel)
+        } else if mode == .live {
+            LiveVoxelView(cloud: camera.liveCloud)
+        } else if let img = camera.depthImage {
+            ZStack {
+                Image(uiImage: img)
+                    .resizable()
+                    .interpolation(.none)
+                    .scaledToFit()
+                    .overlay(
+                        Group {
+                            if mode == .skeleton {
+                                Canvas { ctx, size in
+                                    for hand in camera.hands {
+                                        for p in hand {
+                                            let c = CGPoint(x: p.x * size.width,
+                                                            y: p.y * size.height)
+                                            let r: CGFloat = 5
+                                            let rect = CGRect(x: c.x - r, y: c.y - r,
+                                                              width: r * 2, height: r * 2)
+                                            ctx.fill(Path(ellipseIn: rect),
+                                                     with: .color(Theme.sage))
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    )
+                if mode == .orb {
+                    PalmOrb(palm: camera.palmCenter,
+                            forward: camera.palmForward,
+                            spread: camera.fingerSpread,
+                            palmZ: camera.palmZ,
+                            hueEnabled: optHue)
+                        .allowsHitTesting(false)
+                }
+                if camera.isCalibrating {
+                    BeachballSpinner()
+                        .frame(width: 56, height: 56)
+                        .shadow(color: .black.opacity(0.6), radius: 6)
+                }
+            }
+        } else {
+            VStack(spacing: 8) {
+                ProgressView().tint(Theme.muted)
+                Text("warming the sensor")
+                    .monoCap()
+                    .foregroundColor(Theme.muted)
+            }
+        }
+    }
+
+    private func nowDateString() -> String {
+        let df = DateFormatter()
+        df.dateFormat = "EEE dd MMM"
+        return df.string(from: Date()).lowercased()
     }
 
     private func applyMode(_ m: RangeMode) {
@@ -240,18 +242,388 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Chrome
+
+/// Slim header: eyebrow label + larger title + trailing "•••" button that
+/// opens the mode sheet.
+private struct TopBar: View {
+    let eyebrow: String
+    let title: String
+    let trailing: () -> Void
+    var body: some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(eyebrow).monoCap().foregroundColor(Theme.muted)
+                Text(title).monoCap(size: 13).foregroundColor(Theme.ivory)
+            }
+            Spacer()
+            Button(action: trailing) {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundColor(Theme.ivory)
+                    .frame(width: 36, height: 36)
+                    .background(Theme.surface.opacity(0.6))
+                    .clipShape(Circle())
+            }
+        }
+        .padding(.horizontal, 22)
+        .padding(.top, 14)
+    }
+}
+
+/// Bottom glass card: hero metric on the left (voxel count / fps / %),
+/// compact mode pill + fps pill, mode-contextual controls, and the FAB.
+private struct BottomPanel: View {
+    let mode: RangeMode
+    @ObservedObject var camera: CameraManager
+    @Binding var torchLevel: Float
+    @Binding var optHue: Bool
+    let onCapture: () -> Void
+
+    var body: some View {
+        VStack(spacing: 14) {
+            // Hero row: big numeral + caption, mode pill on the right.
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: -2) {
+                    Text(heroValue)
+                        .font(.system(size: 68, weight: .thin, design: .rounded))
+                        .foregroundColor(Theme.ivory)
+                        .monospacedDigit()
+                    Text(heroCaption)
+                        .monoCap()
+                        .foregroundColor(Theme.muted)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 6) {
+                    ModePill(mode: mode)
+                    if mode != .torch && mode != .live {
+                        Text("\(camera.depthFPS) fps")
+                            .monoCap()
+                            .foregroundColor(Theme.muted)
+                    }
+                }
+            }
+
+            // Mode-contextual controls.
+            Group {
+                switch mode {
+                case .manual:
+                    VStack(spacing: 10) {
+                        ThemedSlider(label: "min z", value: $camera.minZ,
+                                     range: 0.05...2.0, tint: Theme.salmon)
+                        ThemedSlider(label: "max z", value: $camera.maxZ,
+                                     range: 0.05...2.0, tint: Theme.orange)
+                    }
+                case .auto, .live:
+                    RangeBar(lo: camera.minZ, hi: camera.maxZ,
+                             floor: 0.05, ceil: 2.0)
+                case .torch:
+                    ThemedSlider(label: "brightness",
+                                 value: $torchLevel,
+                                 range: 0...1,
+                                 tint: Theme.orange,
+                                 onChange: { camera.setTorchBrightness($0) })
+                case .skeleton:
+                    PinchStatBar(value: min(max(camera.pinch / 0.35, 0), 1),
+                                 hands: camera.hands.count)
+                case .orb:
+                    VStack(spacing: 8) {
+                        PinchStatBar(value: min(max(camera.pinch / 0.35, 0), 1),
+                                     hands: camera.hands.count)
+                        HStack(spacing: 10) {
+                            ToggleChip(label: "HUE", on: $optHue)
+                            ToggleChip(label: "HAPTIC", on: $camera.hapticsEnabled)
+                        }
+                    }
+                }
+            }
+
+            // Shutter row.
+            HStack {
+                Text(camera.statusMessage?.uppercased() ?? "READY")
+                    .monoCap()
+                    .foregroundColor(Theme.muted)
+                    .lineLimit(1)
+                Spacer()
+                FABShutter(busy: camera.isCapturing,
+                           enabled: mode != .torch,
+                           action: onCapture)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 18)
+        .padding(.bottom, 22)
+        .background(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Theme.surface.opacity(0.92))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 28, style: .continuous)
+                        .stroke(Color.white.opacity(0.04), lineWidth: 1)
+                )
+        )
+        .padding(.horizontal, 10)
+        .padding(.bottom, 8)
+    }
+
+    private var heroValue: String {
+        switch mode {
+        case .auto, .manual, .skeleton, .orb:
+            return "\(camera.depthFPS)"
+        case .live:
+            return "\(camera.liveCloud?.positions.count ?? 0)"
+        case .torch:
+            return "\(Int(torchLevel * 100))"
+        }
+    }
+    private var heroCaption: String {
+        switch mode {
+        case .auto, .manual, .skeleton, .orb: return "fps · \(mode.subtitle)"
+        case .live: return "voxels · live cloud"
+        case .torch: return "% · rear torch"
+        }
+    }
+}
+
+private struct ModePill: View {
+    let mode: RangeMode
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: mode.sfSymbol)
+                .font(.system(size: 11, weight: .semibold))
+            Text(mode.title.lowercased())
+                .monoCap(size: 10)
+        }
+        .foregroundColor(Theme.bg)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Capsule().fill(Theme.ivory))
+    }
+}
+
+/// Themed slider. Caption + colored track + value readout on the right.
+private struct ThemedSlider: View {
+    let label: String
+    @Binding var value: Float
+    let range: ClosedRange<Float>
+    let tint: Color
+    var onChange: ((Float) -> Void)? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                HStack(spacing: 6) {
+                    Circle().fill(tint).frame(width: 6, height: 6)
+                    Text(label)
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundColor(Theme.ivory)
+                }
+                Spacer()
+                Text(readout)
+                    .font(.system(size: 13, design: .rounded).monospacedDigit())
+                    .foregroundColor(Theme.muted)
+            }
+            Slider(value: $value, in: range) { editing in
+                if !editing { onChange?(value) }
+            }
+            .tint(tint)
+            .onChange(of: value) { _, new in
+                onChange?(new)
+            }
+        }
+    }
+
+    private var readout: String {
+        if range.upperBound > 1.5 { return String(format: "%.2f m", value) }
+        return String(format: "%.0f %%", value * 100)
+    }
+}
+
+/// Non-interactive bar that visualises the current depth window inside the
+/// available 5–200 cm range. Two dots at min/max, tint in between.
+private struct RangeBar: View {
+    let lo: Float
+    let hi: Float
+    let floor: Float
+    let ceil: Float
+
+    var body: some View {
+        GeometryReader { geo in
+            let span = max(0.001, ceil - floor)
+            let a = CGFloat((lo - floor) / span) * geo.size.width
+            let b = CGFloat((hi - floor) / span) * geo.size.width
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.white.opacity(0.08))
+                Capsule()
+                    .fill(
+                        LinearGradient(
+                            colors: [Theme.salmon, Theme.orange],
+                            startPoint: .leading, endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(4, b - a))
+                    .offset(x: a)
+            }
+        }
+        .frame(height: 8)
+        .overlay(alignment: .leading) {
+            HStack {
+                Text(String(format: "%.0f cm", lo * 100))
+                    .monoCap(size: 10)
+                    .foregroundColor(Theme.muted)
+                Spacer()
+                Text(String(format: "%.0f cm", hi * 100))
+                    .monoCap(size: 10)
+                    .foregroundColor(Theme.muted)
+            }
+            .offset(y: 18)
+        }
+        .padding(.bottom, 16)
+    }
+}
+
+private struct PinchStatBar: View {
+    let value: CGFloat   // 0..1
+    let hands: Int
+    var body: some View {
+        VStack(spacing: 6) {
+            HStack {
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.sage).frame(width: 6, height: 6)
+                    Text("pinch")
+                        .font(.system(size: 13))
+                        .foregroundColor(Theme.ivory)
+                }
+                Spacer()
+                Text("\(hands) hand\(hands == 1 ? "" : "s")")
+                    .monoCap(size: 11).foregroundColor(Theme.muted)
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.08))
+                    Capsule()
+                        .fill(
+                            LinearGradient(
+                                colors: [Theme.sage, Theme.salmon],
+                                startPoint: .leading, endPoint: .trailing
+                            )
+                        )
+                        .frame(width: max(4, geo.size.width * value))
+                }
+            }
+            .frame(height: 6)
+        }
+    }
+}
+
+/// Round cream shutter button with a thin ring. Shows a spinner while busy.
+private struct FABShutter: View {
+    let busy: Bool
+    let enabled: Bool
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .stroke(Theme.ivory.opacity(enabled ? 0.9 : 0.3), lineWidth: 2)
+                    .frame(width: 60, height: 60)
+                if busy {
+                    ProgressView().tint(Theme.ivory)
+                } else {
+                    Circle()
+                        .fill(Theme.ivory.opacity(enabled ? 1.0 : 0.3))
+                        .frame(width: 48, height: 48)
+                }
+            }
+        }
+        .disabled(!enabled || busy)
+    }
+}
+
+/// Mode picker shown as a bottom sheet with big cards, replacing the
+/// segmented tab row.
+private struct ModeSheet: View {
+    @Binding var mode: RangeMode
+    let onSelect: (RangeMode) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("modes")
+                .monoCap()
+                .foregroundColor(Theme.muted)
+                .padding(.horizontal, 22)
+                .padding(.top, 20)
+                .padding(.bottom, 10)
+
+            ScrollView {
+                VStack(spacing: 6) {
+                    ForEach(RangeMode.allCases) { m in
+                        ModeCard(mode: m, active: m == mode) {
+                            onSelect(m)
+                        }
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 24)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Theme.bg)
+    }
+}
+
+private struct ModeCard: View {
+    let mode: RangeMode
+    let active: Bool
+    let onTap: () -> Void
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 14) {
+                Image(systemName: mode.sfSymbol)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(active ? Theme.bg : Theme.ivory)
+                    .frame(width: 46, height: 46)
+                    .background(
+                        Circle().fill(active ? Theme.ivory : Theme.surface)
+                    )
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(mode.subtitle)
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundColor(Theme.ivory)
+                    Text(mode.blurb)
+                        .font(.system(size: 12))
+                        .foregroundColor(Theme.muted)
+                }
+                Spacer()
+                if active {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundColor(Theme.salmon)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(active ? Theme.surface : Theme.surface.opacity(0.5))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 private struct ToggleChip: View {
     let label: String
     @Binding var on: Bool
     var body: some View {
         Button(action: { on.toggle() }) {
-            Text(label)
-                .font(.caption.bold())
-                .foregroundColor(on ? .black : .white.opacity(0.7))
+            Text(label.lowercased())
+                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                .tracking(1.0)
+                .foregroundColor(on ? Theme.bg : Theme.ivory)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
-                .background(on ? Color.white : Color.white.opacity(0.12))
-                .cornerRadius(8)
+                .background(on ? Theme.ivory : Theme.surface)
+                .cornerRadius(10)
         }
     }
 }
