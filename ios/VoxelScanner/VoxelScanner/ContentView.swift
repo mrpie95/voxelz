@@ -84,6 +84,16 @@ struct ContentView: View {
                             .frame(width: 64, height: 64)
                             .shadow(color: .black.opacity(0.6), radius: 6)
                     }
+
+                    if mode == .skeleton || mode == .orb {
+                        VStack {
+                            PinchMeter(value: min(max(camera.pinch / 0.35, 0), 1))
+                                .frame(height: 22)
+                                .padding(.horizontal, 16)
+                                .padding(.top, 12)
+                            Spacer()
+                        }
+                    }
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -257,6 +267,45 @@ private struct PalmOrb: View {
                 .animation(.easeOut(duration: 0.08), value: p)
                 .animation(.easeOut(duration: 0.12), value: spread)
                 .animation(.easeOut(duration: 0.15), value: palmZ)
+            }
+        }
+    }
+}
+
+/// Horizontal bar that fills with a rainbow gradient as `value` (0..1) rises.
+/// Used as a live readout of the hand-pinch amount.
+private struct PinchMeter: View {
+    let value: CGFloat
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 11)
+                    .fill(Color.black.opacity(0.55))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 11)
+                            .stroke(Color.white.opacity(0.35), lineWidth: 1)
+                    )
+                RoundedRectangle(cornerRadius: 11)
+                    .fill(
+                        LinearGradient(
+                            colors: [.cyan, .green, .yellow, .orange, .pink],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .frame(width: max(4, geo.size.width * value))
+                    .animation(.easeOut(duration: 0.08), value: value)
+                HStack {
+                    Text("PINCH")
+                        .font(.caption2.bold())
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(.leading, 10)
+                    Spacer()
+                    Text("\(Int(value * 100))%")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundColor(.white.opacity(0.85))
+                        .padding(.trailing, 10)
+                }
             }
         }
     }

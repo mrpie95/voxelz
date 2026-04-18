@@ -67,12 +67,10 @@ final class CameraManager: NSObject, ObservableObject {
     private let torchQueue = DispatchQueue(label: "voxelscanner.torch")
     private var lastTorchLevel: Float = -1
     private var lastTorchStamp: CFTimeInterval = 0
+    private var torchHoldingLock: Bool = false
 
     private func setTorch(level: Float) {
         let clamped = max(0, min(1, level))
-        // Throttle: only actually touch the hardware if the level moved enough
-        // or enough time has passed. Calling lockForConfiguration/setTorchModeOn
-        // at 15+ Hz can deadlock AVFoundation.
         let now = CACurrentMediaTime()
         let delta = abs(clamped - lastTorchLevel)
         let timeDelta = now - lastTorchStamp
@@ -83,15 +81,28 @@ final class CameraManager: NSObject, ObservableObject {
         torchQueue.async { [weak self] in
             guard let self = self, let d = self.torchDevice else { return }
             do {
-                try d.lockForConfiguration()
                 if clamped <= 0.01 {
-                    if d.torchMode != .off { d.torchMode = .off }
-                } else {
-                    try d.setTorchModeOn(level: max(0.01, clamped))
+                    // Fully off — release the lock so other apps/tools can use the camera.
+                    if self.torchHoldingLock {
+                        try? d.lockForConfiguration()
+                        if d.torchMode != .off { d.torchMode = .off }
+                        d.unlockForConfiguration()
+                        self.torchHoldingLock = false
+                    }
+                    return
                 }
-                d.unlockForConfiguration()
+                // Lock once on the first "on" write and keep the lock while active.
+                if !self.torchHoldingLock {
+                    try d.lockForConfiguration()
+                    self.torchHoldingLock = true
+                }
+                try d.setTorchModeOn(level: max(0.01, clamped))
             } catch {
                 NSLog("[VoxelScanner] torch error: \(error)")
+                if self.torchHoldingLock {
+                    d.unlockForConfiguration()
+                    self.torchHoldingLock = false
+                }
             }
         }
     }
