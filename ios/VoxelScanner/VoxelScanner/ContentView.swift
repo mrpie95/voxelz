@@ -578,6 +578,10 @@ private struct VoxelSceneView: UIViewRepresentable {
             geo.materials = [mat]
 
             let node = SCNNode(geometry: geo)
+            // Sensor captures in landscape-right; phone is held portrait, so
+            // rotate the cloud 90° (CCW around the screen-facing Z axis) to
+            // match the depth view's on-screen orientation.
+            node.eulerAngles = SCNVector3(0, 0, Float.pi / 2)
             scene.rootNode.addChildNode(node)
         }
 
