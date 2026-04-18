@@ -39,6 +39,12 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var indexTip: CGPoint? = nil
     @Published var pinchZ: Float = 0            // meters, sampled at pinch midpoint
 
+    // Palm-driven state (for ORB mode).
+    @Published var palmCenter: CGPoint? = nil
+    @Published var palmForward: CGVector = .zero   // unit vector wrist → palm, in display-space
+    @Published var fingerSpread: CGFloat = 0       // mean fingertip→palm distance (display units)
+    @Published var palmZ: Float = 0                // meters
+
     private let sessionQueue = DispatchQueue(label: "voxelscanner.session")
     private let dataQueue = DispatchQueue(label: "voxelscanner.data")
 
@@ -448,6 +454,10 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             var thumbPt: CGPoint? = nil
             var indexPt: CGPoint? = nil
             var pinchZv: Float = 0
+            var palmC: CGPoint? = nil
+            var palmFwd: CGVector = .zero
+            var spreadV: CGFloat = 0
+            var palmZv: Float = 0
 
             for (idx, obs) in observations.enumerated() {
                 guard let all = try? obs.recognizedPoints(.all) else { continue }
@@ -478,6 +488,45 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                         pinchZv = sampleDepthZ(at: mid)
                     }
                     centerZ = sampleDepthZ(at: c)
+
+                    // Palm geometry — wrist + 4 MCPs define the palm plate.
+                    if let wrist = all[.wrist], wrist.confidence > 0.3,
+                       let imcp = all[.indexMCP], imcp.confidence > 0.3,
+                       let mmcp = all[.middleMCP], mmcp.confidence > 0.3,
+                       let rmcp = all[.ringMCP], rmcp.confidence > 0.3,
+                       let lmcp = all[.littleMCP], lmcp.confidence > 0.3 {
+                        let w = mapped(wrist)
+                        let im = mapped(imcp)
+                        let mm = mapped(mmcp)
+                        let rm = mapped(rmcp)
+                        let lm = mapped(lmcp)
+                        let pc = CGPoint(
+                            x: (w.x + im.x + mm.x + rm.x + lm.x) / 5,
+                            y: (w.y + im.y + mm.y + rm.y + lm.y) / 5
+                        )
+                        palmC = pc
+                        palmZv = sampleDepthZ(at: pc)
+
+                        // Forward = unit vector from wrist toward palm (finger direction).
+                        let fx = pc.x - w.x, fy = pc.y - w.y
+                        let flen = hypot(fx, fy)
+                        if flen > 0.0001 {
+                            palmFwd = CGVector(dx: fx / flen, dy: fy / flen)
+                        }
+
+                        // Spread = average fingertip-to-palm distance.
+                        var dists: [CGFloat] = []
+                        for key in [VNHumanHandPoseObservation.JointName.thumbTip,
+                                    .indexTip, .middleTip, .ringTip, .littleTip] {
+                            if let p = all[key], p.confidence > 0.3 {
+                                let m = mapped(p)
+                                dists.append(hypot(m.x - pc.x, m.y - pc.y))
+                            }
+                        }
+                        if !dists.isEmpty {
+                            spreadV = dists.reduce(0, +) / CGFloat(dists.count)
+                        }
+                    }
                 }
             }
 
@@ -489,6 +538,10 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                 self.thumbTip = thumbPt
                 self.indexTip = indexPt
                 self.pinchZ = pinchZv
+                self.palmCenter = palmC
+                self.palmForward = palmFwd
+                self.fingerSpread = spreadV
+                self.palmZ = palmZv
             }
         } catch {
             NSLog("[VoxelScanner] hand pose error: \(error)")

@@ -1,21 +1,22 @@
 import SwiftUI
 
 enum RangeMode: String, CaseIterable, Identifiable {
-    case auto, manual, hand
+    case auto, manual, skeleton, orb
     var id: String { rawValue }
     var title: String {
         switch self {
         case .auto: return "AUTO"
         case .manual: return "MANUAL"
-        case .hand: return "HAND"
+        case .skeleton: return "SKEL"
+        case .orb: return "ORB"
         }
     }
+    var needsHand: Bool { self == .skeleton || self == .orb }
 }
 
 struct ContentView: View {
     @StateObject private var camera = CameraManager()
     @State private var mode: RangeMode = .auto
-    @State private var optSpin = true
     @State private var optHue = true
 
     var body: some View {
@@ -30,20 +31,21 @@ struct ContentView: View {
                             .interpolation(.none)
                             .scaledToFit()
                             .overlay(
-                                GeometryReader { geo in
-                                    Canvas { ctx, size in
-                                        for hand in camera.hands {
-                                            for p in hand {
-                                                let c = CGPoint(x: p.x * size.width,
-                                                                y: p.y * size.height)
-                                                let r: CGFloat = 5
-                                                let rect = CGRect(x: c.x - r, y: c.y - r,
-                                                                  width: r * 2, height: r * 2)
-                                                ctx.fill(Path(ellipseIn: rect),
-                                                         with: .color(.green))
+                                Group {
+                                    if mode == .skeleton {
+                                        Canvas { ctx, size in
+                                            for hand in camera.hands {
+                                                for p in hand {
+                                                    let c = CGPoint(x: p.x * size.width,
+                                                                    y: p.y * size.height)
+                                                    let r: CGFloat = 5
+                                                    let rect = CGRect(x: c.x - r, y: c.y - r,
+                                                                      width: r * 2, height: r * 2)
+                                                    ctx.fill(Path(ellipseIn: rect),
+                                                             with: .color(.green))
+                                                }
                                             }
                                         }
-                                        _ = geo
                                     }
                                 }
                             )
@@ -52,12 +54,12 @@ struct ContentView: View {
                             .foregroundColor(.white.opacity(0.6))
                     }
 
-                    if camera.handMode {
-                        PinchProjectedShape(
-                            thumb: camera.thumbTip,
-                            index: camera.indexTip,
-                            pinchZ: camera.pinchZ,
-                            spinEnabled: optSpin,
+                    if mode == .orb {
+                        PalmOrb(
+                            palm: camera.palmCenter,
+                            forward: camera.palmForward,
+                            spread: camera.fingerSpread,
+                            palmZ: camera.palmZ,
                             hueEnabled: optHue
                         )
                         .allowsHitTesting(false)
@@ -97,11 +99,15 @@ struct ContentView: View {
                         }
                     }
 
-                    if mode == .hand {
+                    if mode == .orb {
                         HStack(spacing: 16) {
-                            ToggleChip(label: "TILT", on: $optSpin)
                             ToggleChip(label: "HUE", on: $optHue)
                         }
+                    } else if mode == .skeleton {
+                        Text("21 joints per hand · up to 2 hands")
+                            .font(.caption)
+                            .foregroundColor(.white.opacity(0.6))
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
                         SliderRow(label: "MIN Z",
                                   value: $camera.minZ,
@@ -135,8 +141,8 @@ struct ContentView: View {
         case .manual:
             camera.autoMode = false
             camera.handMode = false
-        case .hand:
-            camera.autoMode = true    // keep Z window auto-tracking the hand
+        case .skeleton, .orb:
+            camera.autoMode = true
             camera.handMode = true
             camera.recalibrateAuto()
         }
@@ -159,145 +165,81 @@ private struct ToggleChip: View {
     }
 }
 
-/// A neon rounded square projected between the thumb and index finger.
-/// Size = thumb↔index distance (spread to grow). Orientation tilts with the
-/// pinch axis. Hue cycles with pinch distance. Brightness falls with Z so the
-/// shape feels pushed "into" the scene as the hand moves away.
-private struct PinchProjectedShape: View {
-    let thumb: CGPoint?
-    let index: CGPoint?
-    let pinchZ: Float
-    let spinEnabled: Bool
+/// A glowing orb anchored at the palm centre. When the hand is pinched the
+/// orb sits right in the palm; as the fingers spread, the orb is pushed away
+/// along the palm-forward direction (wrist → knuckles). Closer hand = brighter.
+private struct PalmOrb: View {
+    let palm: CGPoint?
+    let forward: CGVector
+    let spread: CGFloat
+    let palmZ: Float
     let hueEnabled: Bool
 
     var body: some View {
         GeometryReader { geo in
-            if let t = thumb, let i = index {
-                let mid = CGPoint(x: (t.x + i.x) / 2, y: (t.y + i.y) / 2)
-                let dxN = i.x - t.x
-                let dyN = i.y - t.y
-                let dist = hypot(dxN, dyN) // normalised units
-
+            if let p = palm {
                 let minDim = min(geo.size.width, geo.size.height)
-                // Spread-to-grow: each unit of normalised pinch distance → minDim px.
-                let side = max(24, dist * minDim * 1.1)
+                // Pinched spread is ~0.04-0.08 (display units). Open hand ≈ 0.25-0.35.
+                let pinchedSpread: CGFloat = 0.06
+                let pushT = max(0, (spread - pinchedSpread)) // 0..~0.3
+                let pushPx = pushT * minDim * 2.2            // up to ~0.66 * minDim
+
+                let anchorX = p.x * geo.size.width
+                let anchorY = p.y * geo.size.height
+                let cx = anchorX + forward.dx * pushPx
+                let cy = anchorY + forward.dy * pushPx
+
+                let size = minDim * 0.18
                 let hue: Double = hueEnabled
-                    ? Double(min(max(dist / 0.4, 0), 1))
-                    : 0.82
-
-                // Orient the shape along the pinch axis.
-                let angleRad = atan2(dyN, dxN)
-                let roll = spinEnabled ? angleRad * 180 / .pi : 0
-
-                // Perspective from hand Z: closer = brighter + slight pop.
-                let z = pinchZ > 0 ? CGFloat(pinchZ) : 0.35
+                    ? Double(min(max(spread / 0.35, 0), 1))
+                    : 0.55
+                let z = palmZ > 0 ? CGFloat(palmZ) : 0.35
                 let brightness: Double = {
                     let clamped = min(max(z, 0.15), 0.8)
-                    return 0.55 + Double((0.8 - clamped) / 0.65) * 0.45
-                }()
-                let popScale: CGFloat = {
-                    let clamped = min(max(z, 0.15), 0.8)
-                    return 0.9 + (0.8 - clamped) / 0.65 * 0.25
+                    return 0.6 + Double((0.8 - clamped) / 0.65) * 0.4
                 }()
 
-                // Float the cube above the fingers so they don't block it.
-                // Offset scales with cube size so it always sits just above the grip.
-                let offsetPx = side * 0.75
-                let cx = mid.x * geo.size.width
-                let cy = mid.y * geo.size.height - offsetPx
+                ZStack {
+                    // Glow halo.
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color(hue: hue, saturation: 1, brightness: brightness).opacity(0.9),
+                                    Color(hue: hue, saturation: 1, brightness: brightness).opacity(0.0)
+                                ],
+                                center: .center,
+                                startRadius: 0,
+                                endRadius: size
+                            )
+                        )
+                        .frame(width: size * 2.6, height: size * 2.6)
 
-                NeonCube(side: side, hue: hue, brightness: brightness)
-                    .scaleEffect(popScale)
-                    .rotationEffect(.degrees(roll))
-                    .shadow(color: Color(hue: hue, saturation: 1, brightness: 1)
-                                .opacity(0.8 * brightness),
-                            radius: 18)
-                    .position(x: cx, y: cy)
-                    .animation(.easeOut(duration: 0.06), value: mid)
-                    .animation(.easeOut(duration: 0.1), value: dist)
-                    .animation(.easeOut(duration: 0.15), value: pinchZ)
+                    // Orb body with specular highlight for sphere feel.
+                    Circle()
+                        .fill(
+                            RadialGradient(
+                                colors: [
+                                    Color.white.opacity(0.95),
+                                    Color(hue: hue, saturation: 1, brightness: brightness),
+                                    Color(hue: hue, saturation: 1, brightness: brightness * 0.4)
+                                ],
+                                center: UnitPoint(x: 0.35, y: 0.3),
+                                startRadius: size * 0.02,
+                                endRadius: size * 0.6
+                            )
+                        )
+                        .frame(width: size, height: size)
+                        .overlay(
+                            Circle().stroke(Color.white.opacity(0.5), lineWidth: 1)
+                        )
+                }
+                .position(x: cx, y: cy)
+                .animation(.easeOut(duration: 0.08), value: p)
+                .animation(.easeOut(duration: 0.12), value: spread)
+                .animation(.easeOut(duration: 0.15), value: palmZ)
             }
         }
-    }
-}
-
-/// A 2.5D cube illusion: back face offset up-right, 4 connecting edges, bright
-/// front face on top. Reads as a solid 3D cube without a real renderer.
-private struct NeonCube: View {
-    let side: CGFloat
-    let hue: Double
-    let brightness: Double
-
-    var body: some View {
-        let depth = side * 0.28
-        let boxW = side + depth
-        let boxH = side + depth
-        let corner = side * 0.12
-
-        ZStack {
-            // Back face (dimmer, offset up-right).
-            RoundedRectangle(cornerRadius: corner)
-                .fill(Color(hue: hue, saturation: 1, brightness: brightness * 0.55))
-                .frame(width: side, height: side)
-                .offset(x: depth / 2, y: -depth / 2)
-
-            // Connecting edges.
-            CubeEdges(side: side, depth: depth)
-                .stroke(Color.white.opacity(0.75), lineWidth: 1.5)
-                .frame(width: boxW, height: boxH)
-
-            // Front face on top.
-            RoundedRectangle(cornerRadius: corner)
-                .fill(
-                    LinearGradient(
-                        colors: [
-                            Color(hue: hue, saturation: 1.0, brightness: brightness),
-                            Color(hue: (hue + 0.15).truncatingRemainder(dividingBy: 1),
-                                  saturation: 1.0, brightness: brightness * 0.7)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: corner)
-                        .stroke(Color.white.opacity(0.9), lineWidth: 2)
-                )
-                .frame(width: side, height: side)
-                .offset(x: -depth / 2, y: depth / 2)
-        }
-        .frame(width: boxW, height: boxH)
-    }
-}
-
-private struct CubeEdges: Shape {
-    let side: CGFloat
-    let depth: CGFloat
-
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        // Front face centred at (-d/2, +d/2) relative to rect centre.
-        let cx = rect.midX, cy = rect.midY
-        let s2 = side / 2
-        let d2 = depth / 2
-        let frontC = CGPoint(x: cx - d2, y: cy + d2)
-        let backC  = CGPoint(x: cx + d2, y: cy - d2)
-
-        let fTL = CGPoint(x: frontC.x - s2, y: frontC.y - s2)
-        let fTR = CGPoint(x: frontC.x + s2, y: frontC.y - s2)
-        let fBL = CGPoint(x: frontC.x - s2, y: frontC.y + s2)
-        let fBR = CGPoint(x: frontC.x + s2, y: frontC.y + s2)
-
-        let bTL = CGPoint(x: backC.x - s2, y: backC.y - s2)
-        let bTR = CGPoint(x: backC.x + s2, y: backC.y - s2)
-        let bBL = CGPoint(x: backC.x - s2, y: backC.y + s2)
-        let bBR = CGPoint(x: backC.x + s2, y: backC.y + s2)
-
-        for (a, b) in [(fTL, bTL), (fTR, bTR), (fBL, bBL), (fBR, bBR)] {
-            p.move(to: a)
-            p.addLine(to: b)
-        }
-        return p
     }
 }
 
