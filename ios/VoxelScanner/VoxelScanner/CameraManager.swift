@@ -965,6 +965,14 @@ struct VoxelCapture: Identifiable {
     let depthFloat32: Data
     let intrinsicsJson: Data
 
+    // Structured copies of the raw state so volumetric crop can regenerate
+    // the depth binary from updated bounds without re-capturing.
+    let depthValues: [Float]
+    let depthW: Int
+    let depthH: Int
+    let intrinsicsMatrix: simd_float3x3
+    let intrinsicsReferenceDims: CGSize
+
     static func build(depth: CameraManager.DepthSnapshot, rgb: CVPixelBuffer) -> VoxelCapture {
         // ---- JPEG-encode the RGB frame for sharing.
         let (rgbJpeg, rgbW, rgbH, rgbPixels) = encodeRGB(rgb)
@@ -1092,19 +1100,63 @@ struct VoxelCapture: Identifiable {
             bboxMax: positions.isEmpty ? .zero : mx,
             rgbJpeg: rgbJpeg,
             depthFloat32: depthFloat32,
-            intrinsicsJson: intrJson
+            intrinsicsJson: intrJson,
+            depthValues: depth.values,
+            depthW: depth.width,
+            depthH: depth.height,
+            intrinsicsMatrix: depth.intrinsics,
+            intrinsicsReferenceDims: depth.intrinsicsReferenceDims
         )
     }
 
+    /// Zero-out depth pixels outside the crop volume. Web loader's minZ > 0
+    /// filter then drops them automatically, so the uploaded folder produces
+    /// the same cropped cloud the user saw in the preview.
+    func croppedDepthBinary(cropMin: SIMD3<Float>, cropMax: SIMD3<Float>) -> Data {
+        // Skip if crop equals the full bbox — nothing to mask.
+        if cropMin == bboxMin && cropMax == bboxMax { return depthFloat32 }
+
+        let m = intrinsicsMatrix
+        let refW = Float(intrinsicsReferenceDims.width)
+        let refH = Float(intrinsicsReferenceDims.height)
+        let sX = Float(depthW) / max(1, refW)
+        let sY = Float(depthH) / max(1, refH)
+        let fx = m[0, 0] * sX, fy = m[1, 1] * sY
+        let cx = m[2, 0] * sX, cy = m[2, 1] * sY
+
+        var out = depthValues
+        out.withUnsafeMutableBufferPointer { buf in
+            for v in 0..<depthH {
+                for u in 0..<depthW {
+                    let z = buf[v * depthW + u]
+                    if !z.isFinite || z <= 0 { continue }
+                    let X = (Float(u) - cx) * z / fx
+                    let Y = (Float(v) - cy) * z / fy
+                    if X < cropMin.x || X > cropMax.x ||
+                       Y < cropMin.y || Y > cropMax.y ||
+                       z < cropMin.z || z > cropMax.z {
+                        buf[v * depthW + u] = 0
+                    }
+                }
+            }
+        }
+        return out.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
     /// Write the three capture files to a temp folder and return a zip URL
-    /// suitable for UIActivityViewController.
-    func writeSharePackage() -> URL? {
+    /// suitable for UIActivityViewController. If a crop is passed the depth
+    /// binary is regenerated with out-of-volume pixels zeroed.
+    func writeSharePackage(cropMin: SIMD3<Float>? = nil,
+                           cropMax: SIMD3<Float>? = nil) -> URL? {
         let fm = FileManager.default
         let base = fm.temporaryDirectory.appendingPathComponent("capture-\(Int(Date().timeIntervalSince1970))")
+        let depthBin: Data = (cropMin != nil && cropMax != nil)
+            ? croppedDepthBinary(cropMin: cropMin!, cropMax: cropMax!)
+            : depthFloat32
         do {
             try fm.createDirectory(at: base, withIntermediateDirectories: true)
             try rgbJpeg.write(to: base.appendingPathComponent("rgb.jpg"))
-            try depthFloat32.write(to: base.appendingPathComponent("depth_float32.bin"))
+            try depthBin.write(to: base.appendingPathComponent("depth_float32.bin"))
             try intrinsicsJson.write(to: base.appendingPathComponent("intrinsics.json"))
         } catch {
             NSLog("[VoxelScanner] capture write error: \(error)")

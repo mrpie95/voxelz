@@ -565,25 +565,65 @@ private struct VoxelPreviewSheet: View {
     let capture: VoxelCapture
     let onDismiss: () -> Void
     @State private var shareURL: URL?
+    @State private var cropMin: SIMD3<Float>
+    @State private var cropMax: SIMD3<Float>
+    @State private var showCrop: Bool = false
+
+    init(capture: VoxelCapture, onDismiss: @escaping () -> Void) {
+        self.capture = capture
+        self.onDismiss = onDismiss
+        _cropMin = State(initialValue: capture.bboxMin)
+        _cropMax = State(initialValue: capture.bboxMax)
+    }
 
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
             VStack(spacing: 0) {
-                VoxelSceneView(capture: capture)
+                VoxelSceneView(capture: capture,
+                               cropMin: cropMin,
+                               cropMax: cropMax,
+                               showCropBox: showCrop)
                     .ignoresSafeArea(edges: .top)
 
                 VStack(spacing: 10) {
                     HStack {
-                        Text("\(capture.positions.count) voxels")
+                        Text("\(visibleCount) voxels")
                             .font(.caption.bold())
                             .foregroundColor(.white)
                         Spacer()
-                        let size = capture.bboxMax - capture.bboxMin
+                        let size = cropMax - cropMin
                         Text(String(format: "%.1f × %.1f × %.1f cm",
                                     size.x * 100, size.y * 100, size.z * 100))
                             .font(.caption.monospacedDigit())
                             .foregroundColor(.white.opacity(0.7))
+                    }
+
+                    HStack(spacing: 10) {
+                        Button(action: { withAnimation { showCrop.toggle() } }) {
+                            Text(showCrop ? "HIDE CROP" : "CROP")
+                                .font(.caption.bold())
+                                .foregroundColor(showCrop ? .black : .white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .background(showCrop ? Color.yellow : Color.white.opacity(0.12))
+                                .cornerRadius(8)
+                        }
+                        Button(action: resetCrop) {
+                            Text("RESET")
+                                .font(.caption.bold())
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 9)
+                                .background(Color.white.opacity(0.12))
+                                .cornerRadius(8)
+                        }
+                    }
+
+                    if showCrop {
+                        CropControls(capture: capture,
+                                     cropMin: $cropMin,
+                                     cropMax: $cropMax)
                     }
 
                     HStack(spacing: 12) {
@@ -622,8 +662,71 @@ private struct VoxelPreviewSheet: View {
         }
     }
 
+    private var visibleCount: Int {
+        var n = 0
+        for p in capture.positions {
+            if p.x >= cropMin.x, p.x <= cropMax.x,
+               p.y >= cropMin.y, p.y <= cropMax.y,
+               p.z >= cropMin.z, p.z <= cropMax.z { n += 1 }
+        }
+        return n
+    }
+
+    private func resetCrop() {
+        cropMin = capture.bboxMin
+        cropMax = capture.bboxMax
+    }
+
     private func share() {
-        shareURL = capture.writeSharePackage()
+        shareURL = capture.writeSharePackage(cropMin: cropMin, cropMax: cropMax)
+    }
+}
+
+/// Compact 3-axis crop control. Each axis has a min slider + max slider.
+/// Depth axis is labelled NEAR / FAR for intuition.
+private struct CropControls: View {
+    let capture: VoxelCapture
+    @Binding var cropMin: SIMD3<Float>
+    @Binding var cropMax: SIMD3<Float>
+
+    var body: some View {
+        VStack(spacing: 6) {
+            axisRow(label: "X",
+                    min: capture.bboxMin.x, max: capture.bboxMax.x,
+                    lo: Binding(get: { cropMin.x },
+                                set: { cropMin.x = min($0, cropMax.x) }),
+                    hi: Binding(get: { cropMax.x },
+                                set: { cropMax.x = max($0, cropMin.x) }))
+            axisRow(label: "Y",
+                    min: capture.bboxMin.y, max: capture.bboxMax.y,
+                    lo: Binding(get: { cropMin.y },
+                                set: { cropMin.y = min($0, cropMax.y) }),
+                    hi: Binding(get: { cropMax.y },
+                                set: { cropMax.y = max($0, cropMin.y) }))
+            axisRow(label: "Z",
+                    min: capture.bboxMin.z, max: capture.bboxMax.z,
+                    lo: Binding(get: { cropMin.z },
+                                set: { cropMin.z = min($0, cropMax.z) }),
+                    hi: Binding(get: { cropMax.z },
+                                set: { cropMax.z = max($0, cropMin.z) }))
+        }
+        .padding(10)
+        .background(Color.white.opacity(0.06))
+        .cornerRadius(10)
+    }
+
+    private func axisRow(label: String, min lo0: Float, max hi0: Float,
+                         lo: Binding<Float>, hi: Binding<Float>) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.caption2.bold())
+                .foregroundColor(.white)
+                .frame(width: 18, alignment: .leading)
+            Slider(value: lo, in: lo0...hi0)
+                .tint(.cyan)
+            Slider(value: hi, in: lo0...hi0)
+                .tint(.pink)
+        }
     }
 }
 
@@ -641,117 +744,171 @@ private struct ShareSheet: UIViewControllerRepresentable {
 }
 
 /// SceneKit 3D point cloud view. Uses the built-in camera controls so the user
-/// can pinch / rotate the cloud with one finger.
+/// can pinch / rotate the cloud with one finger. Rebuilds the geometry and
+/// crop-box wireframe whenever the bounds change.
 private struct VoxelSceneView: UIViewRepresentable {
     let capture: VoxelCapture
+    let cropMin: SIMD3<Float>
+    let cropMax: SIMD3<Float>
+    let showCropBox: Bool
+
+    final class Coordinator {
+        var pointsNode: SCNNode?
+        var cropNode: SCNNode?
+        var wrapper: SCNNode?  // holds point + crop, rotated -π/2 around Z
+    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> SCNView {
         let v = SCNView()
         v.backgroundColor = UIColor(white: 0.05, alpha: 1.0)
-        v.autoenablesDefaultLighting = true
         v.allowsCameraControl = true
         v.antialiasingMode = .multisampling4X
 
         let scene = SCNScene()
         v.scene = scene
 
-        // Centre the cloud on the origin so orbit-cam feels natural.
-        let centre = (capture.bboxMin + capture.bboxMax) * 0.5
+        // Wrapper node holds all world content; we apply the -π/2 Z rotation
+        // here so everything (points + crop box) stays aligned.
+        let wrapper = SCNNode()
+        wrapper.eulerAngles = SCNVector3(0, 0, -Float.pi / 2)
+        scene.rootNode.addChildNode(wrapper)
+        context.coordinator.wrapper = wrapper
+
         let extent = simd_length(capture.bboxMax - capture.bboxMin)
-
-        // Build a single InstancedMesh-ish geometry by baking points into a
-        // SCNGeometry source with .point primitives.
-        if !capture.positions.isEmpty {
-            // Flip Y and Z to convert camera-space (Y down, Z forward) to
-            // SceneKit (Y up, -Z forward).
-            var verts: [SIMD3<Float>] = []
-            var cols: [SIMD3<Float>] = []
-            verts.reserveCapacity(capture.positions.count)
-            cols.reserveCapacity(capture.positions.count)
-            for i in 0..<capture.positions.count {
-                let p = capture.positions[i] - centre
-                verts.append(SIMD3<Float>(p.x, -p.y, -p.z))
-                let c = capture.colors[i]
-                cols.append(SIMD3<Float>(Float(c.x) / 255,
-                                         Float(c.y) / 255,
-                                         Float(c.z) / 255))
-            }
-
-            let posData = verts.withUnsafeBufferPointer { Data(buffer: $0) }
-            let colData = cols.withUnsafeBufferPointer { Data(buffer: $0) }
-            let posSource = SCNGeometrySource(
-                data: posData,
-                semantic: .vertex,
-                vectorCount: verts.count,
-                usesFloatComponents: true,
-                componentsPerVector: 3,
-                bytesPerComponent: MemoryLayout<Float>.size,
-                dataOffset: 0,
-                dataStride: MemoryLayout<SIMD3<Float>>.stride
-            )
-            let colSource = SCNGeometrySource(
-                data: colData,
-                semantic: .color,
-                vectorCount: cols.count,
-                usesFloatComponents: true,
-                componentsPerVector: 3,
-                bytesPerComponent: MemoryLayout<Float>.size,
-                dataOffset: 0,
-                dataStride: MemoryLayout<SIMD3<Float>>.stride
-            )
-
-            var indices: [Int32] = (0..<Int32(verts.count)).map { $0 }
-            let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
-            let element = SCNGeometryElement(
-                data: indexData,
-                primitiveType: .point,
-                primitiveCount: verts.count,
-                bytesPerIndex: MemoryLayout<Int32>.size
-            )
-            // pointSize is in world units (metres). Voxels are 4 mm, so this
-            // renders each splat at the voxel's true physical size. The
-            // screen-space clamp is widened so SceneKit actually lets the
-            // projection scale with zoom instead of pinning to a narrow band.
-            element.pointSize = 0.004
-            element.minimumPointScreenSpaceRadius = 0.5
-            element.maximumPointScreenSpaceRadius = 200.0
-
-            let geo = SCNGeometry(sources: [posSource, colSource], elements: [element])
-            // Points have no normals → default Blinn/Phong shading returns 0
-            // and everything renders black. Force unlit shading so vertex
-            // colours come through as-is.
-            let mat = SCNMaterial()
-            mat.lightingModel = .constant
-            mat.isDoubleSided = true
-            mat.diffuse.contents = UIColor.white
-            mat.writesToDepthBuffer = true
-            mat.readsFromDepthBuffer = true
-            geo.materials = [mat]
-
-            let node = SCNNode(geometry: geo)
-            // Sensor captures in landscape-right; phone is held portrait, so
-            // rotate the cloud 90° (CCW around the screen-facing Z axis) to
-            // match the depth view's on-screen orientation.
-            node.eulerAngles = SCNVector3(0, 0, -Float.pi / 2)
-            scene.rootNode.addChildNode(node)
-        }
-
-        // Camera that looks at the centred cloud.
         let cam = SCNCamera()
-        cam.zNear = 0.01
-        cam.zFar = 50
+        cam.zNear = 0.01; cam.zFar = 50
         let camNode = SCNNode()
         camNode.camera = cam
-        let d = max(0.25, extent * 1.6)
-        camNode.position = SCNVector3(0, 0, d)
+        camNode.position = SCNVector3(0, 0, max(0.25, extent * 1.6))
         camNode.look(at: SCNVector3(0, 0, 0))
         scene.rootNode.addChildNode(camNode)
         v.pointOfView = camNode
 
+        rebuildPoints(coordinator: context.coordinator)
+        rebuildCropBox(coordinator: context.coordinator)
         return v
     }
 
-    func updateUIView(_ uiView: SCNView, context: Context) { }
+    func updateUIView(_ uiView: SCNView, context: Context) {
+        rebuildPoints(coordinator: context.coordinator)
+        rebuildCropBox(coordinator: context.coordinator)
+    }
+
+    private func rebuildPoints(coordinator: Coordinator) {
+        guard let wrapper = coordinator.wrapper else { return }
+        coordinator.pointsNode?.removeFromParentNode()
+        if capture.positions.isEmpty { return }
+
+        let centre = (capture.bboxMin + capture.bboxMax) * 0.5
+        var verts: [SIMD3<Float>] = []
+        var cols: [SIMD3<Float>] = []
+        verts.reserveCapacity(capture.positions.count)
+        cols.reserveCapacity(capture.positions.count)
+        for i in 0..<capture.positions.count {
+            let p = capture.positions[i]
+            // Crop test is in original (pre-rotation) world space.
+            if p.x < cropMin.x || p.x > cropMax.x ||
+               p.y < cropMin.y || p.y > cropMax.y ||
+               p.z < cropMin.z || p.z > cropMax.z { continue }
+            let q = p - centre
+            verts.append(SIMD3<Float>(q.x, -q.y, -q.z))
+            let c = capture.colors[i]
+            cols.append(SIMD3<Float>(Float(c.x)/255, Float(c.y)/255, Float(c.z)/255))
+        }
+        if verts.isEmpty { return }
+
+        let posData = verts.withUnsafeBufferPointer { Data(buffer: $0) }
+        let colData = cols.withUnsafeBufferPointer { Data(buffer: $0) }
+        let posSource = SCNGeometrySource(
+            data: posData, semantic: .vertex,
+            vectorCount: verts.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride
+        )
+        let colSource = SCNGeometrySource(
+            data: colData, semantic: .color,
+            vectorCount: cols.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride
+        )
+        var indices: [Int32] = (0..<Int32(verts.count)).map { $0 }
+        let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(
+            data: indexData, primitiveType: .point,
+            primitiveCount: verts.count,
+            bytesPerIndex: MemoryLayout<Int32>.size
+        )
+        element.pointSize = 0.004
+        element.minimumPointScreenSpaceRadius = 0.5
+        element.maximumPointScreenSpaceRadius = 200.0
+
+        let geo = SCNGeometry(sources: [posSource, colSource], elements: [element])
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = UIColor.white
+        mat.isDoubleSided = true
+        geo.materials = [mat]
+
+        let node = SCNNode(geometry: geo)
+        wrapper.addChildNode(node)
+        coordinator.pointsNode = node
+    }
+
+    private func rebuildCropBox(coordinator: Coordinator) {
+        guard let wrapper = coordinator.wrapper else { return }
+        coordinator.cropNode?.removeFromParentNode()
+        guard showCropBox else { return }
+
+        let centre = (capture.bboxMin + capture.bboxMax) * 0.5
+        let cMin = cropMin - centre
+        let cMax = cropMax - centre
+        // Flip Y/Z to match the points. Axis-aligned box corners.
+        let lo = SIMD3<Float>(cMin.x, -cMax.y, -cMax.z)
+        let hi = SIMD3<Float>(cMax.x, -cMin.y, -cMin.z)
+
+        // 8 corners + 12 edges as line primitives.
+        let corners: [SIMD3<Float>] = [
+            SIMD3(lo.x, lo.y, lo.z), SIMD3(hi.x, lo.y, lo.z),
+            SIMD3(hi.x, hi.y, lo.z), SIMD3(lo.x, hi.y, lo.z),
+            SIMD3(lo.x, lo.y, hi.z), SIMD3(hi.x, lo.y, hi.z),
+            SIMD3(hi.x, hi.y, hi.z), SIMD3(lo.x, hi.y, hi.z)
+        ]
+        let edgeIdx: [Int32] = [
+            0,1, 1,2, 2,3, 3,0,      // bottom ring
+            4,5, 5,6, 6,7, 7,4,      // top ring
+            0,4, 1,5, 2,6, 3,7       // verticals
+        ]
+
+        let posData = corners.withUnsafeBufferPointer { Data(buffer: $0) }
+        let posSource = SCNGeometrySource(
+            data: posData, semantic: .vertex,
+            vectorCount: corners.count,
+            usesFloatComponents: true, componentsPerVector: 3,
+            bytesPerComponent: MemoryLayout<Float>.size,
+            dataOffset: 0, dataStride: MemoryLayout<SIMD3<Float>>.stride
+        )
+        let idxData = edgeIdx.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(
+            data: idxData, primitiveType: .line,
+            primitiveCount: edgeIdx.count / 2,
+            bytesPerIndex: MemoryLayout<Int32>.size
+        )
+
+        let geo = SCNGeometry(sources: [posSource], elements: [element])
+        let mat = SCNMaterial()
+        mat.lightingModel = .constant
+        mat.diffuse.contents = UIColor.yellow
+        mat.emission.contents = UIColor.yellow
+        mat.isDoubleSided = true
+        geo.materials = [mat]
+
+        let node = SCNNode(geometry: geo)
+        wrapper.addChildNode(node)
+        coordinator.cropNode = node
+    }
 }
 
 /// Horizontal bar that fills with a rainbow gradient as `value` (0..1) rises.
