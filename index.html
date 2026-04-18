@@ -38,6 +38,20 @@
     box-shadow: 0 0 8px #00f0ff inset, 0 0 16px #7a00ff;
   }
   #regen:hover { background: rgba(0, 240, 255, 0.15); }
+  #loadbtn {
+    position: fixed; top: 56px; right: 16px;
+    padding: 10px 14px;
+    border: 1px solid #ff3cac;
+    background: rgba(10, 0, 22, 0.55);
+    color: #ff3cac;
+    font-family: inherit;
+    letter-spacing: 2px;
+    font-size: 12px;
+    cursor: pointer;
+    text-shadow: 0 0 6px #ff3cac;
+    box-shadow: 0 0 8px #ff3cac inset, 0 0 16px #7a00ff;
+  }
+  #loadbtn:hover { background: rgba(255, 60, 172, 0.15); }
   #panel {
     position: fixed; bottom: 16px; right: 16px;
     padding: 12px 14px;
@@ -66,6 +80,8 @@
   DRAG TO ROTATE · SCROLL TO ZOOM
 </div>
 <button id="regen">REGEN TERRAIN</button>
+<button id="loadbtn">LOAD CAPTURE</button>
+<input id="loadfiles" type="file" multiple webkitdirectory style="display:none" />
 <div id="panel">
   <div class="title">JED TIME</div>
   <label>ENABLE <input type="checkbox" id="osc-toggle" /></label>
@@ -198,63 +214,22 @@ const uSpeedUniform = { value: 1.0 };
 
 let voxelMesh = null;
 
-function buildWorld(seed) {
+function installMesh(positions, colors) {
   if (voxelMesh) {
     scene.remove(voxelMesh);
     voxelMesh.geometry.dispose();
     voxelMesh.material.dispose();
   }
 
-  const positions = [];
-  const colors = [];
-  const half = SIZE / 2 - 0.5;
-
-  // 1. build heightmap so we know neighbors
-  const heights = new Int16Array(SIZE * SIZE);
-  for (let x = 0; x < SIZE; x++) {
-    for (let z = 0; z < SIZE; z++) {
-      const n = fbm(x * 0.12, z * 0.12, seed);
-      heights[x * SIZE + z] = Math.max(1, Math.floor(n * (SIZE * 0.55)));
-    }
-  }
-  const hAt = (x, z) => (x < 0 || z < 0 || x >= SIZE || z >= SIZE) ? 0 : heights[x * SIZE + z];
-
-  // 2. emit voxels, culling fully-enclosed ones
-  for (let x = 0; x < SIZE; x++) {
-    for (let z = 0; z < SIZE; z++) {
-      const h = heights[x * SIZE + z];
-      const hN = hAt(x, z - 1), hS = hAt(x, z + 1), hW = hAt(x - 1, z), hE = hAt(x + 1, z);
-      for (let y = 0; y < h; y++) {
-        // skip if every neighbor (incl vertical) is filled
-        const exposed =
-          y === h - 1 ||           // top exposed
-          y === 0 && false ||       // bottom is under ground
-          y >= hN || y >= hS || y >= hW || y >= hE;
-        if (!exposed) continue;
-        positions.push(x - half, y - 0.5, z - half);
-        let c;
-        if (y < 2) {
-          c = new THREE.Color(0x00ff66); // glowing neon green ground
-        } else {
-          const t = (y - 2) / (SIZE - 3);
-          c = pickColor(t);
-        }
-        const j = 0.92 + hash2(x, z * 7 + y, seed + 11) * 0.08;
-        colors.push(c.r * j, c.g * j, c.b * j);
-      }
-    }
-  }
-
   const count = positions.length / 3;
   const geo = new RoundedBoxGeometry(1.08, 1.08, 1.08, 3, 0.12);
   const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
 
-  // per-instance hue-shift rate + phase
   const rates = new Float32Array(count);
   const phases = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    rates[i] = 0.3 + Math.random() * 1.7;       // relative speed multiplier
-    phases[i] = Math.random() * Math.PI * 2;    // per-voxel start offset
+    rates[i] = 0.3 + Math.random() * 1.7;
+    phases[i] = Math.random() * Math.PI * 2;
   }
 
   mat.onBeforeCompile = (shader) => {
@@ -325,11 +300,171 @@ function buildWorld(seed) {
   voxelMesh = mesh;
 }
 
+function buildWorld(seed) {
+  const positions = [];
+  const colors = [];
+  const half = SIZE / 2 - 0.5;
+
+  // 1. build heightmap so we know neighbors
+  const heights = new Int16Array(SIZE * SIZE);
+  for (let x = 0; x < SIZE; x++) {
+    for (let z = 0; z < SIZE; z++) {
+      const n = fbm(x * 0.12, z * 0.12, seed);
+      heights[x * SIZE + z] = Math.max(1, Math.floor(n * (SIZE * 0.55)));
+    }
+  }
+  const hAt = (x, z) => (x < 0 || z < 0 || x >= SIZE || z >= SIZE) ? 0 : heights[x * SIZE + z];
+
+  // 2. emit voxels, culling fully-enclosed ones
+  for (let x = 0; x < SIZE; x++) {
+    for (let z = 0; z < SIZE; z++) {
+      const h = heights[x * SIZE + z];
+      const hN = hAt(x, z - 1), hS = hAt(x, z + 1), hW = hAt(x - 1, z), hE = hAt(x + 1, z);
+      for (let y = 0; y < h; y++) {
+        // skip if every neighbor (incl vertical) is filled
+        const exposed =
+          y === h - 1 ||           // top exposed
+          y === 0 && false ||       // bottom is under ground
+          y >= hN || y >= hS || y >= hW || y >= hE;
+        if (!exposed) continue;
+        positions.push(x - half, y - 0.5, z - half);
+        let c;
+        if (y < 2) {
+          c = new THREE.Color(0x00ff66); // glowing neon green ground
+        } else {
+          const t = (y - 2) / (SIZE - 3);
+          c = pickColor(t);
+        }
+        const j = 0.92 + hash2(x, z * 7 + y, seed + 11) * 0.08;
+        colors.push(c.r * j, c.g * j, c.b * j);
+      }
+    }
+  }
+
+  installMesh(positions, colors);
+}
+
 buildWorld(Math.random() * 1000);
 
 document.getElementById('regen').addEventListener('click', () => {
   buildWorld(Math.random() * 1000);
 });
+
+// --- TrueDepth capture loader ---
+// User picks a capture folder containing: rgb.jpg, depth_float32.bin, intrinsics.json
+const loadBtn = document.getElementById('loadbtn');
+const loadFiles = document.getElementById('loadfiles');
+loadBtn.addEventListener('click', () => loadFiles.click());
+loadFiles.addEventListener('change', async (ev) => {
+  try {
+    await loadCapture(ev.target.files);
+  } catch (e) {
+    console.error(e);
+    alert('Load failed: ' + e.message);
+  }
+  loadFiles.value = '';
+});
+
+async function loadCapture(fileList) {
+  const files = [...fileList];
+  const find = (name) => files.find(f => f.name === name);
+  const rgbFile = find('rgb.jpg');
+  const depthFile = find('depth_float32.bin');
+  const intrFile = find('intrinsics.json');
+  if (!rgbFile || !depthFile || !intrFile) {
+    alert('Folder must contain rgb.jpg, depth_float32.bin, and intrinsics.json');
+    return;
+  }
+
+  const intr = JSON.parse(await intrFile.text());
+  const W = intr.depth_width, H = intr.depth_height;
+  const depthArr = new Float32Array(await depthFile.arrayBuffer());
+  if (depthArr.length !== W * H) {
+    alert(`Depth buffer size mismatch: ${depthArr.length} floats vs ${W}x${H}`);
+    return;
+  }
+
+  // rescale intrinsics from reference dims -> depth dims.
+  // intrinsic_matrix is column-major: [[fx,0,0],[0,fy,0],[cx,cy,1]]
+  const [refW, refH] = intr.intrinsic_matrix_reference_dimensions;
+  const m = intr.intrinsic_matrix;
+  const sX = W / refW, sY = H / refH;
+  const fx = m[0][0] * sX, fy = m[1][1] * sY;
+  const cx = m[2][0] * sX, cy = m[2][1] * sY;
+
+  // decode RGB into a canvas so we can sample per pixel
+  const img = await new Promise((res, rej) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => rej(new Error('rgb decode failed'));
+    i.src = URL.createObjectURL(rgbFile);
+  });
+  const cvs = document.createElement('canvas');
+  cvs.width = img.width; cvs.height = img.height;
+  const ctx = cvs.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const rgbData = ctx.getImageData(0, 0, img.width, img.height).data;
+  const rgbSX = img.width / W, rgbSY = img.height / H;
+
+  // unproject valid depth pixels into camera-space meters; clamp to plausible
+  // small-object arm's-length range.
+  const MIN_Z = 0.15, MAX_Z = 1.2;
+  const voxelSize = 0.004; // 4 mm bins
+  const bin = new Map();
+  for (let v = 0; v < H; v++) {
+    for (let u = 0; u < W; u++) {
+      const z = depthArr[v * W + u];
+      if (!isFinite(z) || z < MIN_Z || z > MAX_Z) continue;
+      const X = (u - cx) * z / fx;
+      const Y = (v - cy) * z / fy;
+      const ix = Math.round(X / voxelSize);
+      const iy = Math.round(Y / voxelSize);
+      const iz = Math.round(z / voxelSize);
+      const ru = Math.min(img.width  - 1, Math.max(0, Math.floor(u * rgbSX)));
+      const rv = Math.min(img.height - 1, Math.max(0, Math.floor(v * rgbSY)));
+      const p = (rv * img.width + ru) * 4;
+      const key = ix + ',' + iy + ',' + iz;
+      const b = bin.get(key);
+      if (b) { b.r += rgbData[p]; b.g += rgbData[p+1]; b.b += rgbData[p+2]; b.n++; }
+      else bin.set(key, { ix, iy, iz, r: rgbData[p], g: rgbData[p+1], b: rgbData[p+2], n: 1 });
+    }
+  }
+
+  if (bin.size === 0) {
+    alert('No valid depth samples in range — try a closer small object.');
+    return;
+  }
+
+  // center on bbox midpoint. Flip Y and Z so camera-space (Y down, Z forward)
+  // becomes Three.js world space (Y up, camera looks toward -Z).
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const v of bin.values()) {
+    if (v.ix < minX) minX = v.ix; if (v.ix > maxX) maxX = v.ix;
+    if (v.iy < minY) minY = v.iy; if (v.iy > maxY) maxY = v.iy;
+    if (v.iz < minZ) minZ = v.iz; if (v.iz > maxZ) maxZ = v.iz;
+  }
+  const mx = (minX + maxX) / 2;
+  const my = (minY + maxY) / 2;
+  const mz = (minZ + maxZ) / 2;
+
+  const positions = [];
+  const colors = [];
+  for (const v of bin.values()) {
+    positions.push(v.ix - mx, -(v.iy - my), -(v.iz - mz));
+    colors.push((v.r / v.n) / 255, (v.g / v.n) / 255, (v.b / v.n) / 255);
+  }
+
+  installMesh(positions, colors);
+
+  // reframe the camera to the new object
+  const sizeX = maxX - minX, sizeY = maxY - minY, sizeZ = maxZ - minZ;
+  const extent = Math.max(sizeX, sizeY, sizeZ, 10);
+  controls.target.set(0, 0, 0);
+  camera.position.set(extent * 1.2, extent * 0.9, extent * 1.6);
+  controls.update();
+  console.log(`loaded ${bin.size} voxels (extent ${sizeX}x${sizeY}x${sizeZ})`);
+}
 
 // post — bloom for that neon glow
 const composer = new EffectComposer(renderer);
