@@ -683,7 +683,6 @@ private struct VoxelPreviewSheet: View {
 }
 
 /// Compact 3-axis crop control. Each axis has a min slider + max slider.
-/// Depth axis is labelled NEAR / FAR for intuition.
 private struct CropControls: View {
     let capture: VoxelCapture
     @Binding var cropMin: SIMD3<Float>
@@ -727,6 +726,174 @@ private struct CropControls: View {
             Slider(value: hi, in: lo0...hi0)
                 .tint(.pink)
         }
+    }
+}
+
+// --- Direct-manipulation crop (work in progress, not yet wired up) ---
+
+fileprivate enum CropFaceID: Int, CaseIterable {
+    case xPlus, xMinus, yPlus, yMinus, zPlus, zMinus
+
+    var displayNormal: SIMD3<Float> {
+        switch self {
+        case .xPlus:  return SIMD3(1, 0, 0)
+        case .xMinus: return SIMD3(-1, 0, 0)
+        case .yPlus:  return SIMD3(0, 1, 0)
+        case .yMinus: return SIMD3(0, -1, 0)
+        case .zPlus:  return SIMD3(0, 0, 1)
+        case .zMinus: return SIMD3(0, 0, -1)
+        }
+    }
+
+    /// `outward` = displacement along displayNormal in metres (positive = the
+    /// face moves outward from the box centre). Returns new crop bounds.
+    func apply(outward: Float,
+               startMin: SIMD3<Float>, startMax: SIMD3<Float>,
+               bboxMin: SIMD3<Float>, bboxMax: SIMD3<Float>)
+    -> (SIMD3<Float>, SIMD3<Float>) {
+        var mn = startMin, mx = startMax
+        switch self {
+        case .xPlus:  mx.x = min(bboxMax.x, max(startMin.x, startMax.x + outward))
+        case .xMinus: mn.x = max(bboxMin.x, min(startMax.x, startMin.x - outward))
+        // Display Y is flipped from camera Y (we render with -y), so the +Y
+        // handle on-screen corresponds to cropMin.y in camera space.
+        case .yPlus:  mn.y = max(bboxMin.y, min(startMax.y, startMin.y - outward))
+        case .yMinus: mx.y = min(bboxMax.y, max(startMin.y, startMax.y + outward))
+        case .zPlus:  mn.z = max(bboxMin.z, min(startMax.z, startMin.z - outward))
+        case .zMinus: mx.z = min(bboxMax.z, max(startMin.z, startMax.z + outward))
+        }
+        return (mn, mx)
+    }
+}
+
+fileprivate struct CropDragState {
+    let face: CropFaceID
+    let planePoint: SIMD3<Float>
+    let planeNormal: SIMD3<Float>   // camera forward in world space
+    let startWorldHit: SIMD3<Float>
+    let worldOutwardDir: SIMD3<Float>
+    let startMin: SIMD3<Float>
+    let startMax: SIMD3<Float>
+}
+
+/// SCNView subclass that intercepts touches on crop handles before the
+/// built-in camera controller sees them.
+final class CropSCNView: SCNView {
+    fileprivate var drag: CropDragState?
+    fileprivate var handleNodes: [CropFaceID: SCNNode] = [:]
+    fileprivate weak var wrapperNode: SCNNode?
+    fileprivate var onDragUpdate: ((SIMD3<Float>, SIMD3<Float>) -> Void)?
+    fileprivate var onDragEnd: (() -> Void)?
+    fileprivate var bboxMin: SIMD3<Float> = .zero
+    fileprivate var bboxMax: SIMD3<Float> = .zero
+    fileprivate var cropMinNow: SIMD3<Float> = .zero
+    fileprivate var cropMaxNow: SIMD3<Float> = .zero
+    fileprivate var dragEnabled: Bool = false
+
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard dragEnabled, let t = touches.first else {
+            super.touchesBegan(touches, with: event); return
+        }
+        let pt = t.location(in: self)
+        let hits = hitTest(pt, options: [
+            SCNHitTestOption.searchMode: SCNHitTestSearchMode.closest.rawValue,
+            SCNHitTestOption.ignoreHiddenNodes: true
+        ])
+        for hit in hits {
+            for (face, node) in handleNodes where hit.node === node {
+                if let d = startDrag(face: face, touchPt: pt) {
+                    drag = d
+                    return
+                }
+            }
+        }
+        super.touchesBegan(touches, with: event)
+    }
+
+    override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
+        guard let d = drag, let t = touches.first else {
+            super.touchesMoved(touches, with: event); return
+        }
+        let pt = t.location(in: self)
+        guard let hit = rayIntersect(screen: pt,
+                                     planePoint: d.planePoint,
+                                     planeNormal: d.planeNormal) else { return }
+        let worldDelta = hit - d.startWorldHit
+        let outward = simd_dot(worldDelta, d.worldOutwardDir)
+        let (mn, mx) = d.face.apply(outward: outward,
+                                    startMin: d.startMin,
+                                    startMax: d.startMax,
+                                    bboxMin: bboxMin,
+                                    bboxMax: bboxMax)
+        cropMinNow = mn; cropMaxNow = mx
+        onDragUpdate?(mn, mx)
+    }
+
+    override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if drag != nil {
+            drag = nil
+            onDragEnd?()
+        } else {
+            super.touchesEnded(touches, with: event)
+        }
+    }
+
+    override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        if drag != nil {
+            drag = nil
+            onDragEnd?()
+        } else {
+            super.touchesCancelled(touches, with: event)
+        }
+    }
+
+    private func startDrag(face: CropFaceID, touchPt: CGPoint) -> CropDragState? {
+        guard let wrapper = wrapperNode,
+              let pov = pointOfView else { return nil }
+        guard let handle = handleNodes[face] else { return nil }
+        let handleWorld = simd_float3(handle.simdWorldPosition)
+        // Drag plane faces the camera.
+        let camFront = normalize(simd_float3(pov.simdWorldFront))
+        let planeNormal = camFront
+        guard let startHit = rayIntersect(screen: touchPt,
+                                          planePoint: handleWorld,
+                                          planeNormal: planeNormal) else { return nil }
+        // Face outward direction in world space: wrapper rotates display → world.
+        let outwardLocal = face.displayNormal
+        let outwardWorld = normalize(simd_make_float3(
+            wrapper.simdConvertVector(SIMD3<Float>(outwardLocal), to: nil)
+        ))
+        return CropDragState(
+            face: face,
+            planePoint: handleWorld,
+            planeNormal: planeNormal,
+            startWorldHit: startHit,
+            worldOutwardDir: outwardWorld,
+            startMin: cropMinNow,
+            startMax: cropMaxNow
+        )
+    }
+
+    private func rayIntersect(screen: CGPoint,
+                              planePoint: SIMD3<Float>,
+                              planeNormal: SIMD3<Float>) -> SIMD3<Float>? {
+        let nearV = unprojectPoint(SCNVector3(Float(screen.x), Float(screen.y), 0))
+        let farV = unprojectPoint(SCNVector3(Float(screen.x), Float(screen.y), 1))
+        let origin = SIMD3<Float>(Float(nearV.x), Float(nearV.y), Float(nearV.z))
+        let end = SIMD3<Float>(Float(farV.x), Float(farV.y), Float(farV.z))
+        let dir = end - origin
+        let denom = simd_dot(dir, planeNormal)
+        if abs(denom) < 1e-6 { return nil }
+        let t = simd_dot(planePoint - origin, planeNormal) / denom
+        return origin + dir * t
+    }
+}
+
+fileprivate extension SCNNode {
+    func simdConvertVector(_ v: SIMD3<Float>, to other: SCNNode?) -> SIMD3<Float> {
+        let vv = SCNVector3(v.x, v.y, v.z)
+        let out = convertVector(vv, to: other)
+        return SIMD3<Float>(Float(out.x), Float(out.y), Float(out.z))
     }
 }
 
