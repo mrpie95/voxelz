@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum RangeMode: String, CaseIterable, Identifiable {
     case auto, manual, skeleton, orb
