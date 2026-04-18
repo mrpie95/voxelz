@@ -19,6 +19,19 @@ struct ContentView: View {
     @State private var mode: RangeMode = .auto
     @State private var optHue = true
 
+    init() {
+        // Segmented picker text was black-on-black; force legible colours.
+        let appearance = UISegmentedControl.appearance()
+        appearance.setTitleTextAttributes(
+            [.foregroundColor: UIColor.white.withAlphaComponent(0.7),
+             .font: UIFont.boldSystemFont(ofSize: 12)], for: .normal)
+        appearance.setTitleTextAttributes(
+            [.foregroundColor: UIColor.white,
+             .font: UIFont.boldSystemFont(ofSize: 12)], for: .selected)
+        appearance.selectedSegmentTintColor = UIColor(white: 0.32, alpha: 1.0)
+        appearance.backgroundColor = UIColor(white: 0.10, alpha: 1.0)
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -179,20 +192,21 @@ private struct PalmOrb: View {
         GeometryReader { geo in
             if let p = palm {
                 let minDim = min(geo.size.width, geo.size.height)
-                // Pinched spread is ~0.04-0.08 (display units). Open hand ≈ 0.25-0.35.
+                // Orb always sits on the palm centre. Spread "pushes it toward
+                // the camera" — which on a flat screen means it grows (the palm
+                // normal is the Z axis from the user's POV).
+                let cx = p.x * geo.size.width
+                let cy = p.y * geo.size.height
+
                 let pinchedSpread: CGFloat = 0.06
-                let pushT = max(0, (spread - pinchedSpread)) // 0..~0.3
-                let pushPx = pushT * minDim * 2.2            // up to ~0.66 * minDim
+                let openSpread: CGFloat = 0.32
+                let t = min(max((spread - pinchedSpread) / (openSpread - pinchedSpread), 0), 1)
+                let size = minDim * (0.06 + 0.22 * t)  // 0.06 · minDim when pinched → 0.28 when open
 
-                let anchorX = p.x * geo.size.width
-                let anchorY = p.y * geo.size.height
-                let cx = anchorX + forward.dx * pushPx
-                let cy = anchorY + forward.dy * pushPx
-
-                let size = minDim * 0.18
                 let hue: Double = hueEnabled
-                    ? Double(min(max(spread / 0.35, 0), 1))
+                    ? Double(t)
                     : 0.55
+                _ = forward  // (palm-normal direction no longer drives screen offset)
                 let z = palmZ > 0 ? CGFloat(palmZ) : 0.35
                 let brightness: Double = {
                     let clamped = min(max(z, 0.15), 0.8)
