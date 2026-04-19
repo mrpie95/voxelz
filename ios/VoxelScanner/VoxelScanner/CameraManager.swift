@@ -1206,17 +1206,16 @@ struct VoxelCapture: Identifiable {
         }
         CVPixelBufferUnlockBaseAddress(pb, .readOnly)
 
-        // Encode to JPEG in the RAW sensor orientation (landscape). The depth
-        // buffer is also landscape, and the web loader samples RGB pixels
-        // using the depth (u, v) indices — so both MUST share the same
-        // coordinate frame. If we rotate the JPEG here, the web sampler
-        // indexes a rotated image with unrotated coords → wrong colour on
-        // every voxel. Display rotation happens at render time (SceneKit
-        // node / Three.js mesh), not on the raw file.
+        // Encode to JPEG via CoreImage for sharing.
         let ci = CIImage(cvPixelBuffer: pb)
+        // Front-camera video buffers arrive landscape + mirrored; apply the
+        // right transform so rgb.jpg looks upright when a human opens it.
+        // The web loader detects this rotation via intrinsics.rgb_width/
+        // height vs the actual JPEG dimensions and samples accordingly.
+        let oriented = ci.oriented(.leftMirrored)
         let context = CIContext(options: nil)
         var jpegData = Data()
-        if let cg = context.createCGImage(ci, from: ci.extent),
+        if let cg = context.createCGImage(oriented, from: oriented.extent),
            let data = UIImage(cgImage: cg).jpegData(compressionQuality: 0.85) {
             jpegData = data
         }

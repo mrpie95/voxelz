@@ -511,12 +511,27 @@ async function loadCapture(fileList) {
     i.onerror = () => rej(new Error('rgb decode failed'));
     i.src = URL.createObjectURL(rgbFile);
   });
+
+  // iOS applies EXIF `.leftMirrored` to rgb.jpg so it looks upright when a
+  // human opens it. Under the hood that's a TRANSPOSE: raw pixel (x, y)
+  // ends up stored at JPEG (y, x). intrinsics.rgb_width/height still report
+  // the RAW (landscape) dims, and depth_float32.bin is landscape too, so
+  // we detect the transpose by comparing loaded-JPEG dims to intrinsics
+  // and swap axes in the sampling formula below.
+  const rawRgbW = intr.rgb_width  || img.width;
+  const rawRgbH = intr.rgb_height || img.height;
+  const transposed = (img.width !== rawRgbW || img.height !== rawRgbH);
+  console.log(`[voxelz] rgb.jpg ${img.width}×${img.height}, intrinsics raw ${rawRgbW}×${rawRgbH}, transposed=${transposed}`);
+
   const cvs = document.createElement('canvas');
   cvs.width = img.width; cvs.height = img.height;
   const ctx = cvs.getContext('2d');
   ctx.drawImage(img, 0, 0);
   const rgbData = ctx.getImageData(0, 0, img.width, img.height).data;
-  const rgbSX = img.width / W, rgbSY = img.height / H;
+  // These scale from depth dims into the RAW (landscape) RGB frame. The
+  // sampling index below converts that to the JPEG's actual layout.
+  const rgbSX = rawRgbW / W;
+  const rgbSY = rawRgbH / H;
 
   // unproject valid depth pixels into camera-space meters; clamp to plausible
   // small-object arm's-length range.
@@ -532,9 +547,14 @@ async function loadCapture(fileList) {
       const ix = Math.round(X / voxelSize);
       const iy = Math.round(Y / voxelSize);
       const iz = Math.round(z / voxelSize);
-      const ru = Math.min(img.width  - 1, Math.max(0, Math.floor(u * rgbSX)));
-      const rv = Math.min(img.height - 1, Math.max(0, Math.floor(v * rgbSY)));
-      const p = (rv * img.width + ru) * 4;
+      // (ru, rv) = pixel coords in the RAW (landscape) RGB frame.
+      const ru = Math.min(rawRgbW - 1, Math.max(0, Math.floor(u * rgbSX)));
+      const rv = Math.min(rawRgbH - 1, Math.max(0, Math.floor(v * rgbSY)));
+      // Map to the actual stored JPEG layout. Transposed JPEG stores raw
+      // (ru, rv) at position (rv, ru) → pixel index uses ru as the row.
+      const p = transposed
+        ? (ru * img.width + rv) * 4
+        : (rv * img.width + ru) * 4;
       const key = ix + ',' + iy + ',' + iz;
       const b = bin.get(key);
       if (b) { b.r += rgbData[p]; b.g += rgbData[p+1]; b.b += rgbData[p+2]; b.n++; }
