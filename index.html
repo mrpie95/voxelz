@@ -4,84 +4,191 @@
 <meta charset="UTF-8" />
 <title>VOXELZ // NEON</title>
 <style>
+  /* ---- cream / mocha palette (matches the iOS app) ---- */
+  :root {
+    --bg:      #D8C9B4;     /* warm tan, same as scene backdrop */
+    --bg2:     #C6B59D;
+    --ink:     #3A2A22;
+    --ink-mid: #6B5548;
+    --ink-lo:  #C8B5A5;
+    --surface: #FFFFFF;
+    --accent:  #A94B4B;     /* terracotta */
+    --accent2: #8C9B78;     /* sage */
+    --accent3: #C98850;     /* warm amber */
+    --line:    rgba(58, 42, 34, 0.12);
+  }
   html, body {
     margin: 0; padding: 0; overflow: hidden;
-    background: #0a0016;
-    font-family: "Courier New", monospace;
-    color: #ff3cac;
+    background: var(--bg);
+    font-family: "Inter", -apple-system, system-ui, sans-serif;
+    color: var(--ink);
   }
   #app { position: fixed; inset: 0; }
+
+  .card {
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    color: var(--ink);
+    border-radius: 14px;
+    padding: 10px 14px;
+    font-size: 12px;
+    letter-spacing: 0.6px;
+    box-shadow: 0 2px 16px rgba(58, 42, 34, 0.08);
+  }
+
   #hud {
     position: fixed; top: 16px; left: 16px;
-    padding: 10px 14px;
-    border: 1px solid #ff3cac;
-    background: rgba(10, 0, 22, 0.55);
-    text-shadow: 0 0 6px #ff3cac, 0 0 12px #7a00ff;
-    box-shadow: 0 0 8px #ff3cac inset, 0 0 16px #7a00ff;
-    letter-spacing: 2px;
-    font-size: 12px;
+    font-family: "SF Mono", "Menlo", monospace;
+    font-size: 11px;
+    letter-spacing: 1.4px;
+    color: var(--ink-mid);
+    text-transform: uppercase;
     pointer-events: none;
     user-select: none;
   }
-  #hud b { color: #00f0ff; text-shadow: 0 0 6px #00f0ff; }
-  #regen {
-    position: fixed; top: 16px; right: 16px;
-    padding: 10px 14px;
-    border: 1px solid #00f0ff;
-    background: rgba(10, 0, 22, 0.55);
-    color: #00f0ff;
+  #hud b { color: var(--ink); font-weight: 600; }
+
+  .topbtn {
+    position: fixed; right: 16px;
     font-family: inherit;
-    letter-spacing: 2px;
-    font-size: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1.6px;
     cursor: pointer;
-    text-shadow: 0 0 6px #00f0ff;
-    box-shadow: 0 0 8px #00f0ff inset, 0 0 16px #7a00ff;
-  }
-  #regen:hover { background: rgba(0, 240, 255, 0.15); }
-  #loadbtn {
-    position: fixed; top: 56px; right: 16px;
+    text-transform: uppercase;
     padding: 10px 14px;
-    border: 1px solid #ff3cac;
-    background: rgba(10, 0, 22, 0.55);
-    color: #ff3cac;
-    font-family: inherit;
-    letter-spacing: 2px;
-    font-size: 12px;
-    cursor: pointer;
-    text-shadow: 0 0 6px #ff3cac;
-    box-shadow: 0 0 8px #ff3cac inset, 0 0 16px #7a00ff;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    color: var(--ink);
+    transition: background 0.15s, transform 0.08s;
   }
-  #loadbtn:hover { background: rgba(255, 60, 172, 0.15); }
+  .topbtn:hover  { background: rgba(255, 255, 255, 0.95); }
+  .topbtn:active { transform: translateY(1px); }
+  #regen    { top: 16px; }
+  #loadbtn  { top: 56px; }
+  #loadzipbtn { top: 96px; }
+
+  /* Accent stripes so the buttons are still visually distinct */
+  #regen     { box-shadow: inset 3px 0 0 var(--accent2); }
+  #loadbtn   { box-shadow: inset 3px 0 0 var(--accent); }
+  #loadzipbtn{ box-shadow: inset 3px 0 0 var(--accent3); }
+
+  #viewpanel {
+    position: fixed; left: 16px; bottom: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.78);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    color: var(--ink);
+    font-family: "SF Mono", "Menlo", monospace;
+    letter-spacing: 1.3px;
+    font-size: 11px;
+    box-shadow: 0 4px 22px rgba(58, 42, 34, 0.1);
+    min-width: 200px;
+    user-select: none;
+    display: none;
+  }
+  #viewpanel .title {
+    color: var(--ink-mid);
+    margin-bottom: 10px;
+    letter-spacing: 2.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+  }
+  #viewpanel .grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px;
+  }
+  #viewpanel button {
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.6);
+    color: var(--ink);
+    font-family: inherit;
+    letter-spacing: 1.4px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 7px 0;
+    cursor: pointer;
+    border-radius: 8px;
+    text-transform: uppercase;
+  }
+  #viewpanel button:hover { background: var(--bg2); }
+  #viewpanel button.active {
+    background: var(--ink); color: var(--bg);
+    border-color: var(--ink);
+  }
+  #viewpanel .row { display: flex; gap: 6px; margin-top: 6px; }
+  #viewpanel .row button { flex: 1; }
+  #viewpanel .hint {
+    margin-top: 10px; color: var(--ink-lo);
+    font-size: 9.5px; letter-spacing: 1.1px;
+    line-height: 1.5;
+  }
+
   #panel {
     position: fixed; bottom: 16px; right: 16px;
-    padding: 12px 14px;
-    border: 1px solid #ff3cac;
-    background: rgba(10, 0, 22, 0.7);
-    color: #ff3cac;
-    font-family: "Courier New", monospace;
-    letter-spacing: 1.5px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.78);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    color: var(--ink);
+    font-family: "SF Mono", "Menlo", monospace;
+    letter-spacing: 1.1px;
     font-size: 11px;
-    box-shadow: 0 0 8px #ff3cac inset, 0 0 14px #7a00ff;
-    min-width: 220px;
+    box-shadow: 0 4px 22px rgba(58, 42, 34, 0.1);
+    min-width: 230px;
     user-select: none;
   }
   #panel label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; gap: 10px; }
   #panel label:last-child { margin-bottom: 0; }
-  #panel input[type="range"] { flex: 1; accent-color: #00f0ff; }
-  #panel input[type="checkbox"] { accent-color: #00f0ff; transform: scale(1.2); }
-  #panel .val { color: #00f0ff; min-width: 30px; text-align: right; text-shadow: 0 0 4px #00f0ff; }
-  #panel .title { color: #00f0ff; text-shadow: 0 0 6px #00f0ff; margin-bottom: 10px; font-size: 12px; }
+  #panel input[type="range"] { flex: 1; accent-color: var(--accent); }
+  #panel input[type="checkbox"] { accent-color: var(--accent); transform: scale(1.2); }
+  #panel .val { color: var(--ink-mid); min-width: 30px; text-align: right; }
+  #panel .title {
+    color: var(--ink-mid); margin-bottom: 10px; font-size: 11px;
+    letter-spacing: 2px; text-transform: uppercase; font-weight: 700;
+  }
 </style>
 </head>
 <body>
 <div id="app"></div>
 <div id="hud">
   VOXELZ <b>32×32×32</b> · FPS <b id="fps">--</b><br/>
-  DRAG TO ROTATE · SCROLL TO ZOOM
+  DRAG TO ROTATE · SCROLL TO ZOOM · SHIFT+DRAG TO PAN · DBL-CLICK TO FOCUS
 </div>
-<button id="regen">REGEN TERRAIN</button>
-<button id="loadbtn">LOAD CAPTURE</button>
+<button id="regen" class="topbtn">REGEN TERRAIN</button>
+<button id="loadbtn" class="topbtn">LOAD CAPTURE</button>
+<button id="loadzipbtn" class="topbtn">LOAD .ZIP</button>
 <input id="loadfiles" type="file" multiple webkitdirectory style="display:none" />
+<input id="loadzipfile" type="file" accept=".zip,application/zip" style="display:none" />
+
+<div id="viewpanel">
+  <div class="title">VIEW</div>
+  <div class="grid">
+    <button data-view="front">FRONT</button>
+    <button data-view="back">BACK</button>
+    <button data-view="top">TOP</button>
+    <button data-view="left">LEFT</button>
+    <button data-view="right">RIGHT</button>
+    <button data-view="iso">ISO</button>
+  </div>
+  <div class="row">
+    <button id="view-reset">RESET</button>
+    <button id="view-spin">AUTO-SPIN</button>
+  </div>
+  <div class="hint">
+    KEYS &nbsp; 1-6 = VIEWS · R = RESET · S = SPIN<br/>
+    SHIFT + DRAG = PAN &nbsp; · &nbsp; DBL-CLICK = SET FOCUS
+  </div>
+</div>
 <div id="panel">
   <div class="title">JED TIME</div>
   <label>ENABLE <input type="checkbox" id="osc-toggle" /></label>
@@ -115,8 +222,13 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 const SIZE = 32;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0a0016);
-scene.fog = new THREE.Fog(0x0a0016, 60, 140);
+// Slightly darker / warmer "studio backdrop" tone so cream-coloured
+// scans don't wash out against pure cream. Fog matches so distant
+// geometry fades cleanly.
+const BG_DEFAULT  = 0xD8C9B4;   // warm tan (scans)
+const BG_TERRAIN  = 0xF5EFE6;   // original cream (terrain world)
+scene.background = new THREE.Color(BG_DEFAULT);
+scene.fog = new THREE.Fog(BG_DEFAULT, 60, 180);
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 500);
 camera.position.set(60, 46, 60);
@@ -131,9 +243,59 @@ document.getElementById('app').appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.autoRotate = true;
+// AUTO-SPIN is now an explicit toggle in the view panel (and we rotate
+// the mesh itself, not the camera, so loaded captures look stable).
+controls.autoRotate = false;
 controls.autoRotateSpeed = 0.8;
 controls.target.set(0, 4, 0);
+// Three-button mapping so pan is easy regardless of mouse/trackpad:
+//   Left   drag = rotate  (default)
+//   Middle drag = dolly
+//   Right  drag = pan
+// Plus shift+left below for trackpad users without a right-click.
+controls.mouseButtons = {
+  LEFT: THREE.MOUSE.ROTATE,
+  MIDDLE: THREE.MOUSE.DOLLY,
+  RIGHT: THREE.MOUSE.PAN,
+};
+controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+
+// Shift+drag toggles pan while held — convenient on Mac trackpads.
+window.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Shift') controls.mouseButtons.LEFT = THREE.MOUSE.PAN;
+});
+window.addEventListener('keyup', (ev) => {
+  if (ev.key === 'Shift') controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
+});
+
+// Double-click a voxel to recenter the orbit target on that spot.
+const raycaster = new THREE.Raycaster();
+const pointer = new THREE.Vector2();
+renderer.domElement.addEventListener('dblclick', (ev) => {
+  if (!voxelMesh) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointer.x = ((ev.clientX - rect.left) / rect.width)  * 2 - 1;
+  pointer.y = -((ev.clientY - rect.top)  / rect.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+  const hits = raycaster.intersectObject(voxelMesh);
+  if (!hits.length) return;
+  const hit = hits[0].point;
+  // Smooth-slide the target so it doesn't snap.
+  const start = controls.target.clone();
+  const startPos = camera.position.clone();
+  const delta = hit.clone().sub(start);
+  const t0 = performance.now();
+  const dur = 260;
+  function step() {
+    const k = Math.min(1, (performance.now() - t0) / dur);
+    const e = 1 - Math.pow(1 - k, 3);   // ease-out cubic
+    controls.target.copy(start).addScaledVector(delta, e);
+    camera.position.copy(startPos).addScaledVector(delta, e);
+    controls.update();
+    if (k < 1) requestAnimationFrame(step);
+  }
+  step();
+});
 
 // neon lights
 scene.add(new THREE.AmbientLight(0x442266, 0.6));
@@ -222,7 +384,9 @@ function installMesh(positions, colors) {
   }
 
   const count = positions.length / 3;
-  const geo = new RoundedBoxGeometry(1.08, 1.08, 1.08, 3, 0.12);
+  // Slightly >1 so adjacent voxels overlap — kills the "holey" look on
+  // captured clouds that don't fill every cell.
+  const geo = new RoundedBoxGeometry(1.22, 1.22, 1.22, 3, 0.14);
   const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
 
   const rates = new Float32Array(count);
@@ -346,8 +510,63 @@ function buildWorld(seed) {
 
 buildWorld(Math.random() * 1000);
 
+// --- view controls (orbit presets, reset, auto-spin) -----------------------
+let viewExtent = 40;
+const viewTarget = new THREE.Vector3(0, 0, 0);
+let autoSpin = false;
+
+const VIEW_PRESETS = {
+  front: { x: 0,  y: 0.1, z: 1.4 },
+  back:  { x: 0,  y: 0.1, z: -1.4 },
+  left:  { x: -1.4, y: 0.1, z: 0 },
+  right: { x: 1.4, y: 0.1, z: 0 },
+  top:   { x: 0.01, y: 1.6, z: 0.01 },
+  iso:   { x: 0.9, y: 0.7, z: 1.2 },
+};
+
+function applyView(name) {
+  const p = VIEW_PRESETS[name] || VIEW_PRESETS.iso;
+  const d = viewExtent * 0.95;
+  controls.target.copy(viewTarget);
+  camera.position.set(p.x * d, p.y * d, p.z * d);
+  controls.update();
+  // highlight the active button.
+  document.querySelectorAll('#viewpanel [data-view]').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === name);
+  });
+}
+
+document.querySelectorAll('#viewpanel [data-view]').forEach(b => {
+  b.addEventListener('click', () => applyView(b.dataset.view));
+});
+document.getElementById('view-reset').addEventListener('click', () => applyView('iso'));
+document.getElementById('view-spin').addEventListener('click', (ev) => {
+  autoSpin = !autoSpin;
+  ev.currentTarget.classList.toggle('active', autoSpin);
+});
+
+window.addEventListener('keydown', (ev) => {
+  // Don't hijack keys while the user is typing in a field.
+  if (ev.target && /INPUT|TEXTAREA/.test(ev.target.tagName)) return;
+  const map = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'iso' };
+  if (map[ev.key]) { applyView(map[ev.key]); ev.preventDefault(); }
+  else if (ev.key.toLowerCase() === 'r') { applyView('iso'); }
+  else if (ev.key.toLowerCase() === 's') {
+    autoSpin = !autoSpin;
+    document.getElementById('view-spin').classList.toggle('active', autoSpin);
+  }
+});
+
 document.getElementById('regen').addEventListener('click', () => {
   buildWorld(Math.random() * 1000);
+  // Restore fog + helpers + mesh orientation after a capture session.
+  if (scene.fog) { scene.fog.near = 60; scene.fog.far = 180; scene.fog.color.setHex(BG_TERRAIN); }
+  scene.background.setHex(BG_TERRAIN);
+  grid.visible = true;
+  bounds.visible = true;
+  if (voxelMesh) voxelMesh.rotation.z = 0;
+  document.getElementById('viewpanel').style.display = 'none';
+  autoSpin = false;
 });
 
 // --- TrueDepth capture loader ---
@@ -365,13 +584,88 @@ loadFiles.addEventListener('change', async (ev) => {
   loadFiles.value = '';
 });
 
+// --- ZIP loader (direct from iOS share sheet) -------------------------------
+// The iPhone SHARE! button hands you a zip containing the three capture files.
+// JSZip unpacks it in-browser so you don't have to manually extract first.
+const loadZipBtn = document.getElementById('loadzipbtn');
+const loadZipFile = document.getElementById('loadzipfile');
+loadZipBtn.addEventListener('click', () => loadZipFile.click());
+loadZipFile.addEventListener('change', async (ev) => {
+  const f = ev.target.files?.[0];
+  loadZipFile.value = '';
+  if (!f) return;
+  try {
+    await loadZip(f);
+  } catch (e) {
+    console.error(e);
+    alert('Zip load failed: ' + e.message);
+  }
+});
+
+// Drag-and-drop support: drop a .zip anywhere on the page.
+window.addEventListener('dragover', (e) => { e.preventDefault(); });
+window.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  const dropped = [...(e.dataTransfer?.files || [])];
+  const zip = dropped.find(f => f.name.toLowerCase().endsWith('.zip'));
+  if (!zip) return;
+  try { await loadZip(zip); }
+  catch (err) { console.error(err); alert('Zip drop failed: ' + err.message); }
+});
+
+async function loadZip(zipBlob) {
+  console.log('[voxelz] loadZip blob:', { name: zipBlob.name, size: zipBlob.size, type: zipBlob.type });
+  if (!window.JSZip) {
+    // Lazy-load JSZip off a CDN so we don't pay for it until you use this path.
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
+      s.onload = res;
+      s.onerror = () => rej(new Error('Could not load JSZip from CDN'));
+      document.head.appendChild(s);
+    });
+  }
+  const archive = await window.JSZip.loadAsync(zipBlob);
+  console.log('[voxelz] zip entries:', Object.keys(archive.files));
+  const pick = (suffix) => {
+    for (const path of Object.keys(archive.files)) {
+      if (path.toLowerCase().endsWith(suffix) && !archive.files[path].dir) {
+        return archive.files[path];
+      }
+    }
+    return null;
+  };
+  const rgbEntry   = pick('rgb.jpg');
+  const depthEntry = pick('depth_float32.bin');
+  const intrEntry  = pick('intrinsics.json');
+  if (!rgbEntry || !depthEntry || !intrEntry) {
+    throw new Error('Zip must contain rgb.jpg, depth_float32.bin, and intrinsics.json');
+  }
+  const [rgbBuf, depthBuf, intrBuf] = await Promise.all([
+    rgbEntry.async('blob'),
+    depthEntry.async('blob'),
+    intrEntry.async('blob')
+  ]);
+  // Wrap as File objects so loadCapture() can reuse its existing path.
+  const toFile = (blob, name, type) => new File([blob], name, { type });
+  const files = [
+    toFile(rgbBuf, 'rgb.jpg', 'image/jpeg'),
+    toFile(depthBuf, 'depth_float32.bin', 'application/octet-stream'),
+    toFile(intrBuf, 'intrinsics.json', 'application/json')
+  ];
+  await loadCapture(files);
+}
+
 async function loadCapture(fileList) {
+  console.groupCollapsed('[voxelz] loadCapture');
   const files = [...fileList];
+  console.log('files:', files.map(f => ({ name: f.name, size: f.size })));
   const find = (name) => files.find(f => f.name === name);
   const rgbFile = find('rgb.jpg');
   const depthFile = find('depth_float32.bin');
   const intrFile = find('intrinsics.json');
   if (!rgbFile || !depthFile || !intrFile) {
+    console.groupEnd();
     alert('Folder must contain rgb.jpg, depth_float32.bin, and intrinsics.json');
     return;
   }
@@ -379,10 +673,24 @@ async function loadCapture(fileList) {
   const intr = JSON.parse(await intrFile.text());
   const W = intr.depth_width, H = intr.depth_height;
   const depthArr = new Float32Array(await depthFile.arrayBuffer());
+  console.log('intrinsics:', intr);
+  console.log('depth floats:', depthArr.length, 'expected:', W * H);
   if (depthArr.length !== W * H) {
+    console.groupEnd();
     alert(`Depth buffer size mismatch: ${depthArr.length} floats vs ${W}x${H}`);
     return;
   }
+
+  // Summarise depth buffer: how many finite, valid, in-range samples.
+  let finite = 0, inRange = 0, zMin = Infinity, zMax = -Infinity;
+  for (let i = 0; i < depthArr.length; i++) {
+    const z = depthArr[i];
+    if (!isFinite(z)) continue;
+    finite++;
+    if (z > 0) { if (z < zMin) zMin = z; if (z > zMax) zMax = z; }
+    if (z >= 0.15 && z <= 1.2) inRange++;
+  }
+  console.log(`depth stats: finite=${finite} / ${depthArr.length}, inRange[0.15,1.2]=${inRange}, zMin=${zMin.toFixed(3)} zMax=${zMax.toFixed(3)}`);
 
   // rescale intrinsics from reference dims -> depth dims.
   // intrinsic_matrix is column-major: [[fx,0,0],[0,fy,0],[cx,cy,1]]
@@ -399,12 +707,27 @@ async function loadCapture(fileList) {
     i.onerror = () => rej(new Error('rgb decode failed'));
     i.src = URL.createObjectURL(rgbFile);
   });
+
+  // iOS applies EXIF `.leftMirrored` to rgb.jpg so it looks upright when a
+  // human opens it. Under the hood that's a TRANSPOSE: raw pixel (x, y)
+  // ends up stored at JPEG (y, x). intrinsics.rgb_width/height still report
+  // the RAW (landscape) dims, and depth_float32.bin is landscape too, so
+  // we detect the transpose by comparing loaded-JPEG dims to intrinsics
+  // and swap axes in the sampling formula below.
+  const rawRgbW = intr.rgb_width  || img.width;
+  const rawRgbH = intr.rgb_height || img.height;
+  const transposed = (img.width !== rawRgbW || img.height !== rawRgbH);
+  console.log(`[voxelz] rgb.jpg ${img.width}×${img.height}, intrinsics raw ${rawRgbW}×${rawRgbH}, transposed=${transposed}`);
+
   const cvs = document.createElement('canvas');
   cvs.width = img.width; cvs.height = img.height;
   const ctx = cvs.getContext('2d');
   ctx.drawImage(img, 0, 0);
   const rgbData = ctx.getImageData(0, 0, img.width, img.height).data;
-  const rgbSX = img.width / W, rgbSY = img.height / H;
+  // These scale from depth dims into the RAW (landscape) RGB frame. The
+  // sampling index below converts that to the JPEG's actual layout.
+  const rgbSX = rawRgbW / W;
+  const rgbSY = rawRgbH / H;
 
   // unproject valid depth pixels into camera-space meters; clamp to plausible
   // small-object arm's-length range.
@@ -420,9 +743,14 @@ async function loadCapture(fileList) {
       const ix = Math.round(X / voxelSize);
       const iy = Math.round(Y / voxelSize);
       const iz = Math.round(z / voxelSize);
-      const ru = Math.min(img.width  - 1, Math.max(0, Math.floor(u * rgbSX)));
-      const rv = Math.min(img.height - 1, Math.max(0, Math.floor(v * rgbSY)));
-      const p = (rv * img.width + ru) * 4;
+      // (ru, rv) = pixel coords in the RAW (landscape) RGB frame.
+      const ru = Math.min(rawRgbW - 1, Math.max(0, Math.floor(u * rgbSX)));
+      const rv = Math.min(rawRgbH - 1, Math.max(0, Math.floor(v * rgbSY)));
+      // Map to the actual stored JPEG layout. Transposed JPEG stores raw
+      // (ru, rv) at position (rv, ru) → pixel index uses ru as the row.
+      const p = transposed
+        ? (ru * img.width + rv) * 4
+        : (rv * img.width + ru) * 4;
       const key = ix + ',' + iy + ',' + iz;
       const b = bin.get(key);
       if (b) { b.r += rgbData[p]; b.g += rgbData[p+1]; b.b += rgbData[p+2]; b.n++; }
@@ -457,13 +785,52 @@ async function loadCapture(fileList) {
 
   installMesh(positions, colors);
 
-  // reframe the camera to the new object
+  // Hide the terrain-world helpers — they're sized for the 32³ grid and
+  // make a scan look like a figurine dropped on a dance floor.
+  grid.visible = false;
+  bounds.visible = false;
+
+  // Sensor captures in landscape; the iOS preview rotates its SCNNode
+  // -90° around Z to look upright in portrait. Do the same here so the
+  // web view matches the phone preview.
+  if (voxelMesh) voxelMesh.rotation.z = -Math.PI / 2;
+
+  // Hand the view panel what it needs to drive presets / auto-spin.
+  viewExtent = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 10);
+  viewTarget.set(0, 0, 0);
+  document.getElementById('viewpanel').style.display = 'block';
+
+  // Warmer tan backdrop so pale scans (faces, dogs) don't wash out.
+  scene.background.setHex(BG_DEFAULT);
+  if (scene.fog) scene.fog.color.setHex(BG_DEFAULT);
+
+  // reframe the camera close to the object
   const sizeX = maxX - minX, sizeY = maxY - minY, sizeZ = maxZ - minZ;
   const extent = Math.max(sizeX, sizeY, sizeZ, 10);
   controls.target.set(0, 0, 0);
-  camera.position.set(extent * 1.2, extent * 0.9, extent * 1.6);
+  // Closer frame so the cloud fills the viewport like the iOS preview.
+  camera.position.set(extent * 0.75, extent * 0.55, extent * 0.95);
   controls.update();
-  console.log(`loaded ${bin.size} voxels (extent ${sizeX}x${sizeY}x${sizeZ})`);
+
+  // The procedural world fog (60–140 units) swallows scans whole because
+  // scan voxel-index extents are much larger / differently anchored than
+  // the 32³ terrain. Rescale fog to the loaded cloud so everything is
+  // visible from the reframed camera.
+  if (scene.fog) {
+    scene.fog.near = extent * 1.5;
+    scene.fog.far  = extent * 6.0;
+  }
+  // Bump the camera far plane just in case.
+  camera.far = Math.max(camera.far, extent * 12);
+  camera.updateProjectionMatrix();
+
+  console.log(`loaded ${bin.size} voxels (extent ${sizeX}×${sizeY}×${sizeZ}, center ${mx.toFixed(1)},${my.toFixed(1)},${mz.toFixed(1)})`);
+  console.log('camera:', camera.position.toArray().map(n => n.toFixed(2)),
+              'far:', camera.far,
+              'fog:', scene.fog ? `${scene.fog.near}–${scene.fog.far}` : 'off');
+  console.log('first 6 voxel positions:', positions.slice(0, 18));
+  console.log('first 6 voxel colors:   ', colors.slice(0, 18));
+  console.groupEnd();
 }
 
 // post — bloom for that neon glow
@@ -527,13 +894,8 @@ const chromaPass = new ShaderPass(ChromaShader);
 composer.addPass(chromaPass);
 composer.addPass(new OutputPass());
 
-// pause autorotate while user drags
-controls.addEventListener('start', () => { controls.autoRotate = false; });
-let idleTimer = null;
-controls.addEventListener('end', () => {
-  clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => { controls.autoRotate = true; }, 2500);
-});
+// (Idle-auto-rotate removed — AUTO-SPIN in the view panel is the
+// explicit rotation control now.)
 
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
@@ -599,6 +961,9 @@ function animate() {
   const dt = clock.getDelta();
   uTimeUniform.value += dt;
   chromaPass.uniforms.uTime.value += dt;
+  if (autoSpin && voxelMesh) {
+    voxelMesh.rotation.y += dt * 0.4;  // ~23°/sec
+  }
   controls.update();
   composer.render();
   frames++;

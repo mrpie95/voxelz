@@ -6,6 +6,7 @@ import UIKit
 import Combine
 import Vision
 import CoreHaptics
+import ARKit
 import simd
 
 /// Depth-only TrueDepth manager. Emits a live grayscale UIImage of the
@@ -58,6 +59,17 @@ final class CameraManager: NSObject, ObservableObject {
     private var lastLiveStamp: CFTimeInterval = 0
     private var currentRGBBuffer: CVPixelBuffer?
     private let rgbBufferLock = NSLock()
+
+    /// Rear-camera LiDAR mode. When true, the TrueDepth AVCaptureSession
+    /// is paused and an ARSession with sceneDepth drives `depthImage`.
+    @Published var lidarMode: Bool = false {
+        didSet {
+            guard oldValue != lidarMode else { return }
+            if lidarMode { switchToLidar() } else { switchToTrueDepth() }
+        }
+    }
+    @Published var lidarSupported: Bool = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    private var arSession: ARSession?
 
     /// Drive the rear torch brightness from the orb spread (0..1). The torch
     /// device is independent from the front TrueDepth session.
@@ -314,6 +326,8 @@ final class CameraManager: NSObject, ObservableObject {
     func stop() {
         setTorch(level: 0)
         stopHaptics()
+        arSession?.pause()
+        arSession = nil
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             if self.session.isRunning { self.session.stopRunning() }
@@ -560,6 +574,16 @@ final class CameraManager: NSObject, ObservableObject {
     /// Result is clamped into a sensible arm's-length band and eased via EMA
     /// so sliders don't flicker between frames.
     private func estimateRange(base: UnsafeRawPointer, w: Int, h: Int, rowBytes: Int) -> (Float, Float)? {
+        // LiDAR scenes span rooms (0.5–5 m); TrueDepth is tight arm's-length
+        // (0.15–1.2 m). Use different clamps so the visible window is
+        // appropriate for each sensor.
+        let isLidar = lidarMode
+        let zMin: Float = isLidar ? 0.30 : 0.08
+        let zMax: Float = isLidar ? 6.0  : 2.5
+        let minWindow: Float = isLidar ? 0.50 : 0.06
+        let maxWindow: Float = isLidar ? 4.0  : 0.25
+        let nearFloor: Float = isLidar ? 0.30 : 0.10
+
         var samples = [Float]()
         samples.reserveCapacity(2000)
         let stride = 3
@@ -569,7 +593,7 @@ final class CameraManager: NSObject, ObservableObject {
             var x = 0
             while x < w {
                 let z = row[x]
-                if z.isFinite && z > 0.08 && z < 2.5 {
+                if z.isFinite && z > zMin && z < zMax {
                     samples.append(z)
                 }
                 x += stride
@@ -583,11 +607,6 @@ final class CameraManager: NSObject, ObservableObject {
         let near = pct(0.05)
         let far  = pct(0.45)
 
-        // Tight window = more colour bits across the subject. Cap hard so a
-        // back wall doesn't balloon the range and flatten everything.
-        let minWindow: Float = 0.06
-        let maxWindow: Float = 0.25
-        let nearFloor: Float = 0.10     // sensor noise floor; don't anchor closer than this
         let lo = max(near, nearFloor)
         var hi = max(far, lo + minWindow)
         if hi - lo > maxWindow { hi = lo + maxWindow }
@@ -597,7 +616,8 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Depth → rotated grayscale image
 
     private func renderRotatedCW(base: UnsafeRawPointer, w: Int, h: Int, rowBytes: Int,
-                                 lo: Float, hi: Float) -> UIImage? {
+                                 lo: Float, hi: Float,
+                                 grayscale: Bool = false) -> UIImage? {
         // Rotate 90° clockwise: source (u, v) → dest (H-1-v, u) in dest of size (H, W).
         let dW = h
         let dH = w
@@ -617,12 +637,18 @@ final class CameraManager: NSObject, ObservableObject {
                 if !z.isFinite || z <= 0 {
                     r = 0; g = 0; b = 0
                 } else {
-                    // 0 = near (hot), 1 = far (cool). Clamp outside window.
+                    // 0 = near, 1 = far. Clamp outside window.
                     let t: Float
                     if z < lo { t = 0 }
                     else if z > hi { t = 1 }
                     else { t = (z - lo) / range }
-                    (r, g, b) = Self.turbo(t)
+                    if grayscale {
+                        // Near = bright, far = dark. Linear gamma, no hue.
+                        let v = UInt8(max(0, min(255, (1 - t) * 255)))
+                        r = v; g = v; b = v
+                    } else {
+                        (r, g, b) = Self.turbo(t)
+                    }
                 }
                 bytes[i + 0] = b
                 bytes[i + 1] = g
@@ -659,6 +685,150 @@ final class CameraManager: NSObject, ObservableObject {
         let b = 0.10667330 + x * (12.64194608 + x * (-60.58204836 + x * (110.36276771 + x * (-89.90310912 + x * 27.34824973))))
         func c(_ v: Float) -> UInt8 { UInt8(max(0, min(255, v * 255))) }
         return (c(r), c(g), c(b))
+    }
+}
+
+// MARK: - LiDAR (ARKit scene-depth) session
+
+extension CameraManager: ARSessionDelegate {
+    fileprivate func switchToLidar() {
+        guard lidarSupported else {
+            DispatchQueue.main.async {
+                self.statusMessage = "LiDAR not supported on this device"
+                self.lidarMode = false
+            }
+            return
+        }
+        // Cancel any pending TrueDepth capture so the shutter spinner doesn't
+        // sit spinning forever while we're on the rear camera.
+        captureLock.lock()
+        captureRequested = false
+        pendingDepthSnap = nil
+        pendingRGBBuffer = nil
+        captureLock.unlock()
+        DispatchQueue.main.async { self.isCapturing = false }
+        // Pause the TrueDepth session so both cameras aren't fighting.
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.session.isRunning { self.session.stopRunning() }
+
+            DispatchQueue.main.async {
+                let config = ARWorldTrackingConfiguration()
+                config.frameSemantics = [.sceneDepth]
+                let s = ARSession()
+                s.delegate = self
+                s.run(config, options: [.resetTracking, .removeExistingAnchors])
+                self.arSession = s
+                self.statusMessage = "LIDAR — rear camera · \(ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) ? "smoothed" : "raw")"
+                self.isRunning = true
+            }
+        }
+    }
+
+    fileprivate func switchToTrueDepth() {
+        // Tear down AR.
+        arSession?.pause()
+        arSession = nil
+        // Resume the TrueDepth session.
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            if !self.session.isRunning { self.session.startRunning() }
+            DispatchQueue.main.async {
+                self.isRunning = self.session.isRunning
+            }
+        }
+    }
+
+    public func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard let sceneDepth = frame.sceneDepth else { return }
+        let pb = sceneDepth.depthMap
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        let w = CVPixelBufferGetWidth(pb)
+        let h = CVPixelBufferGetHeight(pb)
+        let rowBytes = CVPixelBufferGetBytesPerRow(pb)
+        guard let base = CVPixelBufferGetBaseAddress(pb) else {
+            CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+            return
+        }
+
+        // Fixed full-sensor range for LiDAR — no auto-windowing. Near = 30 cm
+        // (sensor floor), far = 5 m. Grayscale makes "closer is whiter" read
+        // the same in every frame.
+        let lo: Float = 0.30
+        let hi: Float = 5.00
+        let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes,
+                                  lo: lo, hi: hi, grayscale: true)
+
+        // Capture snapshot: take the full depth frame + the rear RGB frame
+        // converted from YCbCr to BGRA, then let the existing voxel pipeline
+        // finish the job.
+        captureLock.lock()
+        let needSnap = captureRequested && (pendingDepthSnap == nil || pendingRGBBuffer == nil)
+        captureLock.unlock()
+        if needSnap {
+            var values = [Float](repeating: 0, count: w * h)
+            values.withUnsafeMutableBufferPointer { dst in
+                for v in 0..<h {
+                    let row = base.advanced(by: v * rowBytes).assumingMemoryBound(to: Float.self)
+                    for u in 0..<w { dst[v * w + u] = row[u] }
+                }
+            }
+            let snap = DepthSnapshot(
+                values: values, width: w, height: h,
+                intrinsics: frame.camera.intrinsics,
+                intrinsicsReferenceDims: frame.camera.imageResolution
+            )
+            let bgra = Self.bgraFromYCbCr(frame.capturedImage)
+            captureLock.lock()
+            pendingDepthSnap = snap
+            if let bgra = bgra { pendingRGBBuffer = bgra }
+            captureLock.unlock()
+            tryFinishCapture()
+        }
+
+        CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+
+        frameCount += 1
+        let now = CACurrentMediaTime()
+        let elapsed = now - lastFpsStamp
+        let pushFps = elapsed >= 1.0
+        let fpsValue = pushFps ? Int(Double(frameCount) / elapsed) : nil
+        if pushFps { frameCount = 0; lastFpsStamp = now }
+
+        DispatchQueue.main.async {
+            if let img = img { self.depthImage = img }
+            self.minZ = lo; self.maxZ = hi
+            if let f = fpsValue { self.depthFPS = f }
+        }
+    }
+
+    /// Render an ARKit YpCbCr 4:2:0 frame into a fresh 32BGRA CVPixelBuffer
+    /// so the voxeliser can sample colours the same way it does from the
+    /// TrueDepth video output.
+    private static func bgraFromYCbCr(_ yuv: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(yuv)
+        let h = CVPixelBufferGetHeight(yuv)
+        var out: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault, w, h,
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary, &out
+        )
+        guard status == kCVReturnSuccess, let dst = out else { return nil }
+        let ci = CIImage(cvPixelBuffer: yuv)
+        let ctx = CIContext(options: nil)
+        ctx.render(ci, to: dst)
+        return dst
+    }
+
+    public func session(_ session: ARSession, didFailWithError error: Error) {
+        NSLog("[VoxelScanner] ARSession failed: \(error)")
+        DispatchQueue.main.async {
+            self.statusMessage = "LiDAR error: \(error.localizedDescription)"
+        }
     }
 }
 
@@ -989,8 +1159,8 @@ struct VoxelCapture: Identifiable {
         let cy = m[2, 1] * sY
 
         // ---- Voxelise (matches index.html loadCapture to the millimetre).
-        let minZ: Float = 0.15
-        let maxZ: Float = 1.2
+        // No Z clamp: capture whatever the sensor returned. The gradient
+        // filter below still rejects occlusion-edge smearing.
         let voxelSize: Float = 0.004
 
         struct Bin { var ix: Int; var iy: Int; var iz: Int; var r: Int; var g: Int; var b: Int; var n: Int }
@@ -1011,7 +1181,7 @@ struct VoxelCapture: Identifiable {
                 for v in vStart..<vEnd {
                     for u in uStart..<uEnd {
                         let z = depthPtr[v * dw + u]
-                        if !z.isFinite || z < minZ || z > maxZ { continue }
+                        if !z.isFinite || z <= 0 { continue }
                         // Gradient filter: kill pixels straddling depth edges.
                         let zL = depthPtr[v * dw + (u - 1)]
                         let zR = depthPtr[v * dw + (u + 1)]
@@ -1209,7 +1379,9 @@ struct VoxelCapture: Identifiable {
         // Encode to JPEG via CoreImage for sharing.
         let ci = CIImage(cvPixelBuffer: pb)
         // Front-camera video buffers arrive landscape + mirrored; apply the
-        // right transform so rgb.jpg looks upright for the downstream loader.
+        // right transform so rgb.jpg looks upright when a human opens it.
+        // The web loader detects this rotation via intrinsics.rgb_width/
+        // height vs the actual JPEG dimensions and samples accordingly.
         let oriented = ci.oriented(.leftMirrored)
         let context = CIContext(options: nil)
         var jpegData = Data()

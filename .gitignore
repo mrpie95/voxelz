@@ -1,0 +1,38 @@
+# ---- macOS ----
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# ---- Xcode (local-only state) ----
+xcuserdata/
+*.xcuserstate
+*.xcuserdatad/
+project.xcworkspace/xcuserdata/
+project.xcworkspace/contents.xcworkspacedata
+
+# ---- Xcode build output ----
+build/
+DerivedData/
+*.xcarchive
+*.dSYM.zip
+*.dSYM
+
+# ---- Swift / CocoaPods / SPM ----
+.build/
+.swiftpm/
+Pods/
+Carthage/Build/
+
+# ---- Editors ----
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ---- Captures (local device pulls) ----
+captures/
+*.capture.zip
+
+# ---- Misc ----
+*.log

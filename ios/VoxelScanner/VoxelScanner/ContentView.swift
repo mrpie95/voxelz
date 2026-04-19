@@ -5,13 +5,14 @@ import simd
 import AVKit
 
 enum RangeMode: String, CaseIterable, Identifiable {
-    case auto, manual, live, skeleton, orb, torch
+    case auto, manual, live, lidar, skeleton, orb, torch
     var id: String { rawValue }
     var title: String {
         switch self {
         case .auto: return "AUTO"
         case .manual: return "MAN"
         case .live: return "LIVE"
+        case .lidar: return "LIDAR"
         case .skeleton: return "SKEL"
         case .orb: return "ORB"
         case .torch: return "TORCH"
@@ -22,6 +23,7 @@ enum RangeMode: String, CaseIterable, Identifiable {
         case .auto: return "auto range"
         case .manual: return "manual range"
         case .live: return "live voxel cloud"
+        case .lidar: return "rear lidar"
         case .skeleton: return "hand skeleton"
         case .orb: return "palm orb"
         case .torch: return "rear torch"
@@ -32,6 +34,7 @@ enum RangeMode: String, CaseIterable, Identifiable {
         case .auto: return "wand.and.stars"
         case .manual: return "slider.horizontal.3"
         case .live: return "cube.transparent"
+        case .lidar: return "dot.radiowaves.up.forward"
         case .skeleton: return "hand.raised"
         case .orb: return "circle.hexagongrid"
         case .torch: return "flashlight.on.fill"
@@ -42,6 +45,7 @@ enum RangeMode: String, CaseIterable, Identifiable {
         case .auto: return "Depth range tracks the scene automatically."
         case .manual: return "Drag sliders to set the Z window by hand."
         case .live: return "Real-time voxel cloud you can orbit in 3D."
+        case .lidar: return "Rear LiDAR scene depth. Longer range, works outdoors."
         case .skeleton: return "Vision detects 21 joints on up to 2 hands."
         case .orb: return "Neon orb grows as you open your palm."
         case .torch: return "Rear flashlight slider. Pauses depth."
@@ -237,8 +241,13 @@ struct ContentView: View {
             camera.recalibrateAuto()
         case .torch:
             break
+        case .lidar:
+            camera.autoMode = true
+            camera.handMode = false
+            camera.recalibrateAuto()
         }
         camera.liveCloudEnabled = (m == .live)
+        camera.lidarMode = (m == .lidar)
     }
 }
 
@@ -314,7 +323,7 @@ private struct BottomPanel: View {
                         ThemedSlider(label: "max z", value: $camera.maxZ,
                                      range: 0.05...2.0, tint: Theme.orange)
                     }
-                case .auto, .live:
+                case .auto, .live, .lidar:
                     RangeBar(lo: camera.minZ, hi: camera.maxZ,
                              floor: 0.05, ceil: 2.0)
                 case .torch:
@@ -367,7 +376,7 @@ private struct BottomPanel: View {
 
     private var heroValue: String {
         switch mode {
-        case .auto, .manual, .skeleton, .orb:
+        case .auto, .manual, .skeleton, .orb, .lidar:
             return "\(camera.depthFPS)"
         case .live:
             return "\(camera.liveCloud?.positions.count ?? 0)"
@@ -377,7 +386,7 @@ private struct BottomPanel: View {
     }
     private var heroCaption: String {
         switch mode {
-        case .auto, .manual, .skeleton, .orb: return "fps · \(mode.subtitle)"
+        case .auto, .manual, .skeleton, .orb, .lidar: return "fps · \(mode.subtitle)"
         case .live: return "voxels · live cloud"
         case .torch: return "% · rear torch"
         }
