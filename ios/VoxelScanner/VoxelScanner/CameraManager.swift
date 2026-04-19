@@ -750,22 +750,42 @@ extension CameraManager: ARSessionDelegate {
             CVPixelBufferUnlockBaseAddress(pb, .readOnly)
             return
         }
-        // Auto-range from the depth distribution so the turbo colormap looks
-        // good regardless of room size. We reuse estimateRange() as-is.
-        var lo = minZ, hi = maxZ
-        if autoMode {
-            if let range = estimateRange(base: base, w: w, h: h, rowBytes: rowBytes) {
-                let alpha: Float = 0.25
-                emaLo = emaLo + alpha * (range.0 - emaLo)
-                emaHi = emaHi + alpha * (range.1 - emaHi)
-                lo = emaLo; hi = emaHi
-            }
-        }
-        // Grayscale for LiDAR — it's the familiar scanner look and it keeps
-        // large dynamic ranges (rooms, outdoor) legible where the turbo
-        // colormap just turns into a rainbow smear.
+
+        // Fixed full-sensor range for LiDAR — no auto-windowing. Near = 30 cm
+        // (sensor floor), far = 5 m. Grayscale makes "closer is whiter" read
+        // the same in every frame.
+        let lo: Float = 0.30
+        let hi: Float = 5.00
         let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes,
                                   lo: lo, hi: hi, grayscale: true)
+
+        // Capture snapshot: take the full depth frame + the rear RGB frame
+        // converted from YCbCr to BGRA, then let the existing voxel pipeline
+        // finish the job.
+        captureLock.lock()
+        let needSnap = captureRequested && (pendingDepthSnap == nil || pendingRGBBuffer == nil)
+        captureLock.unlock()
+        if needSnap {
+            var values = [Float](repeating: 0, count: w * h)
+            values.withUnsafeMutableBufferPointer { dst in
+                for v in 0..<h {
+                    let row = base.advanced(by: v * rowBytes).assumingMemoryBound(to: Float.self)
+                    for u in 0..<w { dst[v * w + u] = row[u] }
+                }
+            }
+            let snap = DepthSnapshot(
+                values: values, width: w, height: h,
+                intrinsics: frame.camera.intrinsics,
+                intrinsicsReferenceDims: frame.camera.imageResolution
+            )
+            let bgra = Self.bgraFromYCbCr(frame.capturedImage)
+            captureLock.lock()
+            pendingDepthSnap = snap
+            if let bgra = bgra { pendingRGBBuffer = bgra }
+            captureLock.unlock()
+            tryFinishCapture()
+        }
+
         CVPixelBufferUnlockBaseAddress(pb, .readOnly)
 
         frameCount += 1
@@ -777,9 +797,31 @@ extension CameraManager: ARSessionDelegate {
 
         DispatchQueue.main.async {
             if let img = img { self.depthImage = img }
-            if self.autoMode { self.minZ = lo; self.maxZ = hi }
+            self.minZ = lo; self.maxZ = hi
             if let f = fpsValue { self.depthFPS = f }
         }
+    }
+
+    /// Render an ARKit YpCbCr 4:2:0 frame into a fresh 32BGRA CVPixelBuffer
+    /// so the voxeliser can sample colours the same way it does from the
+    /// TrueDepth video output.
+    private static func bgraFromYCbCr(_ yuv: CVPixelBuffer) -> CVPixelBuffer? {
+        let w = CVPixelBufferGetWidth(yuv)
+        let h = CVPixelBufferGetHeight(yuv)
+        var out: CVPixelBuffer?
+        let attrs: [String: Any] = [
+            kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+        ]
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault, w, h,
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary, &out
+        )
+        guard status == kCVReturnSuccess, let dst = out else { return nil }
+        let ci = CIImage(cvPixelBuffer: yuv)
+        let ctx = CIContext(options: nil)
+        ctx.render(ci, to: dst)
+        return dst
     }
 
     public func session(_ session: ARSession, didFailWithError error: Error) {

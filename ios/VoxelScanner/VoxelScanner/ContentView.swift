@@ -138,7 +138,7 @@ struct ContentView: View {
             }
         }
         .background(
-            VolumeCaptureTrigger(enabled: mode != .torch && mode != .lidar) {
+            VolumeCaptureTrigger(enabled: mode != .torch) {
                 camera.captureVoxels()
             }
             .allowsHitTesting(false)
@@ -354,10 +354,8 @@ private struct BottomPanel: View {
                     .foregroundColor(Theme.muted)
                     .lineLimit(1)
                 Spacer()
-                // Capture is not yet wired for LiDAR (rear RGB comes back as
-                // YCbCr and needs a conversion pass before voxelisation).
                 FABShutter(busy: camera.isCapturing,
-                           enabled: mode != .torch && mode != .lidar,
+                           enabled: mode != .torch,
                            action: onCapture)
             }
         }
