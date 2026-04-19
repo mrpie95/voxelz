@@ -574,6 +574,16 @@ final class CameraManager: NSObject, ObservableObject {
     /// Result is clamped into a sensible arm's-length band and eased via EMA
     /// so sliders don't flicker between frames.
     private func estimateRange(base: UnsafeRawPointer, w: Int, h: Int, rowBytes: Int) -> (Float, Float)? {
+        // LiDAR scenes span rooms (0.5–5 m); TrueDepth is tight arm's-length
+        // (0.15–1.2 m). Use different clamps so the visible window is
+        // appropriate for each sensor.
+        let isLidar = lidarMode
+        let zMin: Float = isLidar ? 0.30 : 0.08
+        let zMax: Float = isLidar ? 6.0  : 2.5
+        let minWindow: Float = isLidar ? 0.50 : 0.06
+        let maxWindow: Float = isLidar ? 4.0  : 0.25
+        let nearFloor: Float = isLidar ? 0.30 : 0.10
+
         var samples = [Float]()
         samples.reserveCapacity(2000)
         let stride = 3
@@ -583,7 +593,7 @@ final class CameraManager: NSObject, ObservableObject {
             var x = 0
             while x < w {
                 let z = row[x]
-                if z.isFinite && z > 0.08 && z < 2.5 {
+                if z.isFinite && z > zMin && z < zMax {
                     samples.append(z)
                 }
                 x += stride
@@ -597,11 +607,6 @@ final class CameraManager: NSObject, ObservableObject {
         let near = pct(0.05)
         let far  = pct(0.45)
 
-        // Tight window = more colour bits across the subject. Cap hard so a
-        // back wall doesn't balloon the range and flatten everything.
-        let minWindow: Float = 0.06
-        let maxWindow: Float = 0.25
-        let nearFloor: Float = 0.10     // sensor noise floor; don't anchor closer than this
         let lo = max(near, nearFloor)
         var hi = max(far, lo + minWindow)
         if hi - lo > maxWindow { hi = lo + maxWindow }
@@ -611,7 +616,8 @@ final class CameraManager: NSObject, ObservableObject {
     // MARK: - Depth → rotated grayscale image
 
     private func renderRotatedCW(base: UnsafeRawPointer, w: Int, h: Int, rowBytes: Int,
-                                 lo: Float, hi: Float) -> UIImage? {
+                                 lo: Float, hi: Float,
+                                 grayscale: Bool = false) -> UIImage? {
         // Rotate 90° clockwise: source (u, v) → dest (H-1-v, u) in dest of size (H, W).
         let dW = h
         let dH = w
@@ -631,12 +637,18 @@ final class CameraManager: NSObject, ObservableObject {
                 if !z.isFinite || z <= 0 {
                     r = 0; g = 0; b = 0
                 } else {
-                    // 0 = near (hot), 1 = far (cool). Clamp outside window.
+                    // 0 = near, 1 = far. Clamp outside window.
                     let t: Float
                     if z < lo { t = 0 }
                     else if z > hi { t = 1 }
                     else { t = (z - lo) / range }
-                    (r, g, b) = Self.turbo(t)
+                    if grayscale {
+                        // Near = bright, far = dark. Linear gamma, no hue.
+                        let v = UInt8(max(0, min(255, (1 - t) * 255)))
+                        r = v; g = v; b = v
+                    } else {
+                        (r, g, b) = Self.turbo(t)
+                    }
                 }
                 bytes[i + 0] = b
                 bytes[i + 1] = g
@@ -681,9 +693,20 @@ final class CameraManager: NSObject, ObservableObject {
 extension CameraManager: ARSessionDelegate {
     fileprivate func switchToLidar() {
         guard lidarSupported else {
-            DispatchQueue.main.async { self.statusMessage = "LiDAR not supported on this device" }
+            DispatchQueue.main.async {
+                self.statusMessage = "LiDAR not supported on this device"
+                self.lidarMode = false
+            }
             return
         }
+        // Cancel any pending TrueDepth capture so the shutter spinner doesn't
+        // sit spinning forever while we're on the rear camera.
+        captureLock.lock()
+        captureRequested = false
+        pendingDepthSnap = nil
+        pendingRGBBuffer = nil
+        captureLock.unlock()
+        DispatchQueue.main.async { self.isCapturing = false }
         // Pause the TrueDepth session so both cameras aren't fighting.
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
@@ -738,7 +761,11 @@ extension CameraManager: ARSessionDelegate {
                 lo = emaLo; hi = emaHi
             }
         }
-        let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes, lo: lo, hi: hi)
+        // Grayscale for LiDAR — it's the familiar scanner look and it keeps
+        // large dynamic ranges (rooms, outdoor) legible where the turbo
+        // colormap just turns into a rainbow smear.
+        let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes,
+                                  lo: lo, hi: hi, grayscale: true)
         CVPixelBufferUnlockBaseAddress(pb, .readOnly)
 
         frameCount += 1
