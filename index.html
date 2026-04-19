@@ -52,6 +52,20 @@
     box-shadow: 0 0 8px #ff3cac inset, 0 0 16px #7a00ff;
   }
   #loadbtn:hover { background: rgba(255, 60, 172, 0.15); }
+  #loadzipbtn {
+    position: fixed; top: 98px; right: 16px;
+    padding: 10px 14px;
+    border: 1px solid #7a00ff;
+    background: rgba(10, 0, 22, 0.55);
+    color: #c49bff;
+    font-family: inherit;
+    letter-spacing: 2px;
+    font-size: 12px;
+    cursor: pointer;
+    text-shadow: 0 0 6px #7a00ff;
+    box-shadow: 0 0 8px #7a00ff inset, 0 0 16px #ff3cac;
+  }
+  #loadzipbtn:hover { background: rgba(122, 0, 255, 0.18); }
   #panel {
     position: fixed; bottom: 16px; right: 16px;
     padding: 12px 14px;
@@ -81,7 +95,9 @@
 </div>
 <button id="regen">REGEN TERRAIN</button>
 <button id="loadbtn">LOAD CAPTURE</button>
+<button id="loadzipbtn">LOAD .ZIP</button>
 <input id="loadfiles" type="file" multiple webkitdirectory style="display:none" />
+<input id="loadzipfile" type="file" accept=".zip,application/zip" style="display:none" />
 <div id="panel">
   <div class="title">JED TIME</div>
   <label>ENABLE <input type="checkbox" id="osc-toggle" /></label>
@@ -364,6 +380,76 @@ loadFiles.addEventListener('change', async (ev) => {
   }
   loadFiles.value = '';
 });
+
+// --- ZIP loader (direct from iOS share sheet) -------------------------------
+// The iPhone SHARE! button hands you a zip containing the three capture files.
+// JSZip unpacks it in-browser so you don't have to manually extract first.
+const loadZipBtn = document.getElementById('loadzipbtn');
+const loadZipFile = document.getElementById('loadzipfile');
+loadZipBtn.addEventListener('click', () => loadZipFile.click());
+loadZipFile.addEventListener('change', async (ev) => {
+  const f = ev.target.files?.[0];
+  loadZipFile.value = '';
+  if (!f) return;
+  try {
+    await loadZip(f);
+  } catch (e) {
+    console.error(e);
+    alert('Zip load failed: ' + e.message);
+  }
+});
+
+// Drag-and-drop support: drop a .zip anywhere on the page.
+window.addEventListener('dragover', (e) => { e.preventDefault(); });
+window.addEventListener('drop', async (e) => {
+  e.preventDefault();
+  const dropped = [...(e.dataTransfer?.files || [])];
+  const zip = dropped.find(f => f.name.toLowerCase().endsWith('.zip'));
+  if (!zip) return;
+  try { await loadZip(zip); }
+  catch (err) { console.error(err); alert('Zip drop failed: ' + err.message); }
+});
+
+async function loadZip(zipBlob) {
+  if (!window.JSZip) {
+    // Lazy-load JSZip off a CDN so we don't pay for it until you use this path.
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js';
+      s.onload = res;
+      s.onerror = () => rej(new Error('Could not load JSZip from CDN'));
+      document.head.appendChild(s);
+    });
+  }
+  const archive = await window.JSZip.loadAsync(zipBlob);
+  const pick = (suffix) => {
+    for (const path of Object.keys(archive.files)) {
+      if (path.toLowerCase().endsWith(suffix) && !archive.files[path].dir) {
+        return archive.files[path];
+      }
+    }
+    return null;
+  };
+  const rgbEntry   = pick('rgb.jpg');
+  const depthEntry = pick('depth_float32.bin');
+  const intrEntry  = pick('intrinsics.json');
+  if (!rgbEntry || !depthEntry || !intrEntry) {
+    throw new Error('Zip must contain rgb.jpg, depth_float32.bin, and intrinsics.json');
+  }
+  const [rgbBuf, depthBuf, intrBuf] = await Promise.all([
+    rgbEntry.async('blob'),
+    depthEntry.async('blob'),
+    intrEntry.async('blob')
+  ]);
+  // Wrap as File objects so loadCapture() can reuse its existing path.
+  const toFile = (blob, name, type) => new File([blob], name, { type });
+  const files = [
+    toFile(rgbBuf, 'rgb.jpg', 'image/jpeg'),
+    toFile(depthBuf, 'depth_float32.bin', 'application/octet-stream'),
+    toFile(intrBuf, 'intrinsics.json', 'application/json')
+  ];
+  await loadCapture(files);
+}
 
 async function loadCapture(fileList) {
   const files = [...fileList];
