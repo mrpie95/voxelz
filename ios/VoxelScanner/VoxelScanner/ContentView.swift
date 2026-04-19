@@ -323,7 +323,7 @@ private struct BottomPanel: View {
                         ThemedSlider(label: "max z", value: $camera.maxZ,
                                      range: 0.05...2.0, tint: Theme.orange)
                     }
-                case .auto, .live:
+                case .auto, .live, .lidar:
                     RangeBar(lo: camera.minZ, hi: camera.maxZ,
                              floor: 0.05, ceil: 2.0)
                 case .torch:
@@ -376,7 +376,7 @@ private struct BottomPanel: View {
 
     private var heroValue: String {
         switch mode {
-        case .auto, .manual, .skeleton, .orb:
+        case .auto, .manual, .skeleton, .orb, .lidar:
             return "\(camera.depthFPS)"
         case .live:
             return "\(camera.liveCloud?.positions.count ?? 0)"
@@ -386,7 +386,7 @@ private struct BottomPanel: View {
     }
     private var heroCaption: String {
         switch mode {
-        case .auto, .manual, .skeleton, .orb: return "fps · \(mode.subtitle)"
+        case .auto, .manual, .skeleton, .orb, .lidar: return "fps · \(mode.subtitle)"
         case .live: return "voxels · live cloud"
         case .torch: return "% · rear torch"
         }
