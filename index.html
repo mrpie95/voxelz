@@ -413,6 +413,7 @@ window.addEventListener('drop', async (e) => {
 });
 
 async function loadZip(zipBlob) {
+  console.log('[voxelz] loadZip blob:', { name: zipBlob.name, size: zipBlob.size, type: zipBlob.type });
   if (!window.JSZip) {
     // Lazy-load JSZip off a CDN so we don't pay for it until you use this path.
     await new Promise((res, rej) => {
@@ -424,6 +425,7 @@ async function loadZip(zipBlob) {
     });
   }
   const archive = await window.JSZip.loadAsync(zipBlob);
+  console.log('[voxelz] zip entries:', Object.keys(archive.files));
   const pick = (suffix) => {
     for (const path of Object.keys(archive.files)) {
       if (path.toLowerCase().endsWith(suffix) && !archive.files[path].dir) {
@@ -454,12 +456,15 @@ async function loadZip(zipBlob) {
 }
 
 async function loadCapture(fileList) {
+  console.groupCollapsed('[voxelz] loadCapture');
   const files = [...fileList];
+  console.log('files:', files.map(f => ({ name: f.name, size: f.size })));
   const find = (name) => files.find(f => f.name === name);
   const rgbFile = find('rgb.jpg');
   const depthFile = find('depth_float32.bin');
   const intrFile = find('intrinsics.json');
   if (!rgbFile || !depthFile || !intrFile) {
+    console.groupEnd();
     alert('Folder must contain rgb.jpg, depth_float32.bin, and intrinsics.json');
     return;
   }
@@ -467,10 +472,24 @@ async function loadCapture(fileList) {
   const intr = JSON.parse(await intrFile.text());
   const W = intr.depth_width, H = intr.depth_height;
   const depthArr = new Float32Array(await depthFile.arrayBuffer());
+  console.log('intrinsics:', intr);
+  console.log('depth floats:', depthArr.length, 'expected:', W * H);
   if (depthArr.length !== W * H) {
+    console.groupEnd();
     alert(`Depth buffer size mismatch: ${depthArr.length} floats vs ${W}x${H}`);
     return;
   }
+
+  // Summarise depth buffer: how many finite, valid, in-range samples.
+  let finite = 0, inRange = 0, zMin = Infinity, zMax = -Infinity;
+  for (let i = 0; i < depthArr.length; i++) {
+    const z = depthArr[i];
+    if (!isFinite(z)) continue;
+    finite++;
+    if (z > 0) { if (z < zMin) zMin = z; if (z > zMax) zMax = z; }
+    if (z >= 0.15 && z <= 1.2) inRange++;
+  }
+  console.log(`depth stats: finite=${finite} / ${depthArr.length}, inRange[0.15,1.2]=${inRange}, zMin=${zMin.toFixed(3)} zMax=${zMax.toFixed(3)}`);
 
   // rescale intrinsics from reference dims -> depth dims.
   // intrinsic_matrix is column-major: [[fx,0,0],[0,fy,0],[cx,cy,1]]
@@ -564,7 +583,13 @@ async function loadCapture(fileList) {
   camera.far = Math.max(camera.far, extent * 12);
   camera.updateProjectionMatrix();
 
-  console.log(`loaded ${bin.size} voxels (extent ${sizeX}x${sizeY}x${sizeZ})`);
+  console.log(`loaded ${bin.size} voxels (extent ${sizeX}×${sizeY}×${sizeZ}, center ${mx.toFixed(1)},${my.toFixed(1)},${mz.toFixed(1)})`);
+  console.log('camera:', camera.position.toArray().map(n => n.toFixed(2)),
+              'far:', camera.far,
+              'fog:', scene.fog ? `${scene.fog.near}–${scene.fog.far}` : 'off');
+  console.log('first 6 voxel positions:', positions.slice(0, 18));
+  console.log('first 6 voxel colors:   ', colors.slice(0, 18));
+  console.groupEnd();
 }
 
 // post — bloom for that neon glow
