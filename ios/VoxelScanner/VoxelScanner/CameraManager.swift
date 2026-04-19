@@ -6,6 +6,7 @@ import UIKit
 import Combine
 import Vision
 import CoreHaptics
+import ARKit
 import simd
 
 /// Depth-only TrueDepth manager. Emits a live grayscale UIImage of the
@@ -58,6 +59,17 @@ final class CameraManager: NSObject, ObservableObject {
     private var lastLiveStamp: CFTimeInterval = 0
     private var currentRGBBuffer: CVPixelBuffer?
     private let rgbBufferLock = NSLock()
+
+    /// Rear-camera LiDAR mode. When true, the TrueDepth AVCaptureSession
+    /// is paused and an ARSession with sceneDepth drives `depthImage`.
+    @Published var lidarMode: Bool = false {
+        didSet {
+            guard oldValue != lidarMode else { return }
+            if lidarMode { switchToLidar() } else { switchToTrueDepth() }
+        }
+    }
+    @Published var lidarSupported: Bool = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
+    private var arSession: ARSession?
 
     /// Drive the rear torch brightness from the orb spread (0..1). The torch
     /// device is independent from the front TrueDepth session.
@@ -314,6 +326,8 @@ final class CameraManager: NSObject, ObservableObject {
     func stop() {
         setTorch(level: 0)
         stopHaptics()
+        arSession?.pause()
+        arSession = nil
         sessionQueue.async { [weak self] in
             guard let self = self else { return }
             if self.session.isRunning { self.session.stopRunning() }
@@ -659,6 +673,93 @@ final class CameraManager: NSObject, ObservableObject {
         let b = 0.10667330 + x * (12.64194608 + x * (-60.58204836 + x * (110.36276771 + x * (-89.90310912 + x * 27.34824973))))
         func c(_ v: Float) -> UInt8 { UInt8(max(0, min(255, v * 255))) }
         return (c(r), c(g), c(b))
+    }
+}
+
+// MARK: - LiDAR (ARKit scene-depth) session
+
+extension CameraManager: ARSessionDelegate {
+    fileprivate func switchToLidar() {
+        guard lidarSupported else {
+            DispatchQueue.main.async { self.statusMessage = "LiDAR not supported on this device" }
+            return
+        }
+        // Pause the TrueDepth session so both cameras aren't fighting.
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            if self.session.isRunning { self.session.stopRunning() }
+
+            DispatchQueue.main.async {
+                let config = ARWorldTrackingConfiguration()
+                config.frameSemantics = [.sceneDepth]
+                let s = ARSession()
+                s.delegate = self
+                s.run(config, options: [.resetTracking, .removeExistingAnchors])
+                self.arSession = s
+                self.statusMessage = "LIDAR — rear camera · \(ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) ? "smoothed" : "raw")"
+                self.isRunning = true
+            }
+        }
+    }
+
+    fileprivate func switchToTrueDepth() {
+        // Tear down AR.
+        arSession?.pause()
+        arSession = nil
+        // Resume the TrueDepth session.
+        sessionQueue.async { [weak self] in
+            guard let self = self else { return }
+            if !self.session.isRunning { self.session.startRunning() }
+            DispatchQueue.main.async {
+                self.isRunning = self.session.isRunning
+            }
+        }
+    }
+
+    public func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard let sceneDepth = frame.sceneDepth else { return }
+        let pb = sceneDepth.depthMap
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        let w = CVPixelBufferGetWidth(pb)
+        let h = CVPixelBufferGetHeight(pb)
+        let rowBytes = CVPixelBufferGetBytesPerRow(pb)
+        guard let base = CVPixelBufferGetBaseAddress(pb) else {
+            CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+            return
+        }
+        // Auto-range from the depth distribution so the turbo colormap looks
+        // good regardless of room size. We reuse estimateRange() as-is.
+        var lo = minZ, hi = maxZ
+        if autoMode {
+            if let range = estimateRange(base: base, w: w, h: h, rowBytes: rowBytes) {
+                let alpha: Float = 0.25
+                emaLo = emaLo + alpha * (range.0 - emaLo)
+                emaHi = emaHi + alpha * (range.1 - emaHi)
+                lo = emaLo; hi = emaHi
+            }
+        }
+        let img = renderRotatedCW(base: base, w: w, h: h, rowBytes: rowBytes, lo: lo, hi: hi)
+        CVPixelBufferUnlockBaseAddress(pb, .readOnly)
+
+        frameCount += 1
+        let now = CACurrentMediaTime()
+        let elapsed = now - lastFpsStamp
+        let pushFps = elapsed >= 1.0
+        let fpsValue = pushFps ? Int(Double(frameCount) / elapsed) : nil
+        if pushFps { frameCount = 0; lastFpsStamp = now }
+
+        DispatchQueue.main.async {
+            if let img = img { self.depthImage = img }
+            if self.autoMode { self.minZ = lo; self.maxZ = hi }
+            if let f = fpsValue { self.depthFPS = f }
+        }
+    }
+
+    public func session(_ session: ARSession, didFailWithError error: Error) {
+        NSLog("[VoxelScanner] ARSession failed: \(error)")
+        DispatchQueue.main.async {
+            self.statusMessage = "LiDAR error: \(error.localizedDescription)"
+        }
     }
 }
 
