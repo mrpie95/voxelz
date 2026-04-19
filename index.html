@@ -6,8 +6,8 @@
 <style>
   /* ---- cream / mocha palette (matches the iOS app) ---- */
   :root {
-    --bg:      #F5EFE6;
-    --bg2:     #EBE1D3;
+    --bg:      #D8C9B4;     /* warm tan, same as scene backdrop */
+    --bg2:     #C6B59D;
     --ink:     #3A2A22;
     --ink-mid: #6B5548;
     --ink-lo:  #C8B5A5;
@@ -222,10 +222,13 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 const SIZE = 32;
 
 const scene = new THREE.Scene();
-// Cream background matching the chrome; fog same colour so objects fade
-// seamlessly into the page rather than into a dark void.
-scene.background = new THREE.Color(0xF5EFE6);
-scene.fog = new THREE.Fog(0xF5EFE6, 60, 180);
+// Slightly darker / warmer "studio backdrop" tone so cream-coloured
+// scans don't wash out against pure cream. Fog matches so distant
+// geometry fades cleanly.
+const BG_DEFAULT  = 0xD8C9B4;   // warm tan (scans)
+const BG_TERRAIN  = 0xF5EFE6;   // original cream (terrain world)
+scene.background = new THREE.Color(BG_DEFAULT);
+scene.fog = new THREE.Fog(BG_DEFAULT, 60, 180);
 
 const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 500);
 camera.position.set(60, 46, 60);
@@ -240,7 +243,9 @@ document.getElementById('app').appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.dampingFactor = 0.08;
-controls.autoRotate = true;
+// AUTO-SPIN is now an explicit toggle in the view panel (and we rotate
+// the mesh itself, not the camera, so loaded captures look stable).
+controls.autoRotate = false;
 controls.autoRotateSpeed = 0.8;
 controls.target.set(0, 4, 0);
 // Three-button mapping so pan is easy regardless of mouse/trackpad:
@@ -555,7 +560,8 @@ window.addEventListener('keydown', (ev) => {
 document.getElementById('regen').addEventListener('click', () => {
   buildWorld(Math.random() * 1000);
   // Restore fog + helpers + mesh orientation after a capture session.
-  if (scene.fog) { scene.fog.near = 60; scene.fog.far = 180; }
+  if (scene.fog) { scene.fog.near = 60; scene.fog.far = 180; scene.fog.color.setHex(BG_TERRAIN); }
+  scene.background.setHex(BG_TERRAIN);
   grid.visible = true;
   bounds.visible = true;
   if (voxelMesh) voxelMesh.rotation.z = 0;
@@ -793,6 +799,10 @@ async function loadCapture(fileList) {
   viewExtent = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 10);
   viewTarget.set(0, 0, 0);
   document.getElementById('viewpanel').style.display = 'block';
+
+  // Warmer tan backdrop so pale scans (faces, dogs) don't wash out.
+  scene.background.setHex(BG_DEFAULT);
+  if (scene.fog) scene.fog.color.setHex(BG_DEFAULT);
 
   // reframe the camera close to the object
   const sizeX = maxX - minX, sizeY = maxY - minY, sizeZ = maxZ - minZ;
