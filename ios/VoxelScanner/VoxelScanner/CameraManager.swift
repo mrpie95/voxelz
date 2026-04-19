@@ -1159,8 +1159,8 @@ struct VoxelCapture: Identifiable {
         let cy = m[2, 1] * sY
 
         // ---- Voxelise (matches index.html loadCapture to the millimetre).
-        let minZ: Float = 0.15
-        let maxZ: Float = 1.2
+        // No Z clamp: capture whatever the sensor returned. The gradient
+        // filter below still rejects occlusion-edge smearing.
         let voxelSize: Float = 0.004
 
         struct Bin { var ix: Int; var iy: Int; var iz: Int; var r: Int; var g: Int; var b: Int; var n: Int }
@@ -1181,7 +1181,7 @@ struct VoxelCapture: Identifiable {
                 for v in vStart..<vEnd {
                     for u in uStart..<uEnd {
                         let z = depthPtr[v * dw + u]
-                        if !z.isFinite || z < minZ || z > maxZ { continue }
+                        if !z.isFinite || z <= 0 { continue }
                         // Gradient filter: kill pixels straddling depth edges.
                         let zL = depthPtr[v * dw + (u - 1)]
                         let zR = depthPtr[v * dw + (u + 1)]
