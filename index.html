@@ -366,10 +366,11 @@ buildWorld(Math.random() * 1000);
 
 document.getElementById('regen').addEventListener('click', () => {
   buildWorld(Math.random() * 1000);
-  // Restore fog + helpers in case a capture suppressed them.
+  // Restore fog + helpers + mesh orientation after a capture session.
   if (scene.fog) { scene.fog.near = 60; scene.fog.far = 140; }
   grid.visible = true;
   bounds.visible = true;
+  if (voxelMesh) voxelMesh.rotation.z = 0;
 });
 
 // --- TrueDepth capture loader ---
@@ -572,6 +573,11 @@ async function loadCapture(fileList) {
   // make a scan look like a figurine dropped on a dance floor.
   grid.visible = false;
   bounds.visible = false;
+
+  // Sensor captures in landscape; the iOS preview rotates its SCNNode
+  // -90° around Z to look upright in portrait. Do the same here so the
+  // web view matches the phone preview.
+  if (voxelMesh) voxelMesh.rotation.z = -Math.PI / 2;
 
   // reframe the camera close to the object
   const sizeX = maxX - minX, sizeY = maxY - minY, sizeZ = maxZ - minZ;
