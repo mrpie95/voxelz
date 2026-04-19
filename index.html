@@ -238,7 +238,9 @@ function installMesh(positions, colors) {
   }
 
   const count = positions.length / 3;
-  const geo = new RoundedBoxGeometry(1.08, 1.08, 1.08, 3, 0.12);
+  // Slightly >1 so adjacent voxels overlap — kills the "holey" look on
+  // captured clouds that don't fill every cell.
+  const geo = new RoundedBoxGeometry(1.22, 1.22, 1.22, 3, 0.14);
   const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, toneMapped: false });
 
   const rates = new Float32Array(count);
@@ -364,8 +366,10 @@ buildWorld(Math.random() * 1000);
 
 document.getElementById('regen').addEventListener('click', () => {
   buildWorld(Math.random() * 1000);
-  // Restore fog to the terrain-tuned values in case a capture widened it.
+  // Restore fog + helpers in case a capture suppressed them.
   if (scene.fog) { scene.fog.near = 60; scene.fog.far = 140; }
+  grid.visible = true;
+  bounds.visible = true;
 });
 
 // --- TrueDepth capture loader ---
@@ -564,11 +568,17 @@ async function loadCapture(fileList) {
 
   installMesh(positions, colors);
 
-  // reframe the camera to the new object
+  // Hide the terrain-world helpers — they're sized for the 32³ grid and
+  // make a scan look like a figurine dropped on a dance floor.
+  grid.visible = false;
+  bounds.visible = false;
+
+  // reframe the camera close to the object
   const sizeX = maxX - minX, sizeY = maxY - minY, sizeZ = maxZ - minZ;
   const extent = Math.max(sizeX, sizeY, sizeZ, 10);
   controls.target.set(0, 0, 0);
-  camera.position.set(extent * 1.2, extent * 0.9, extent * 1.6);
+  // Closer frame so the cloud fills the viewport like the iOS preview.
+  camera.position.set(extent * 0.75, extent * 0.55, extent * 0.95);
   controls.update();
 
   // The procedural world fog (60–140 units) swallows scans whole because
