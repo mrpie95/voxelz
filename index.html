@@ -364,6 +364,8 @@ buildWorld(Math.random() * 1000);
 
 document.getElementById('regen').addEventListener('click', () => {
   buildWorld(Math.random() * 1000);
+  // Restore fog to the terrain-tuned values in case a capture widened it.
+  if (scene.fog) { scene.fog.near = 60; scene.fog.far = 140; }
 });
 
 // --- TrueDepth capture loader ---
@@ -549,6 +551,19 @@ async function loadCapture(fileList) {
   controls.target.set(0, 0, 0);
   camera.position.set(extent * 1.2, extent * 0.9, extent * 1.6);
   controls.update();
+
+  // The procedural world fog (60–140 units) swallows scans whole because
+  // scan voxel-index extents are much larger / differently anchored than
+  // the 32³ terrain. Rescale fog to the loaded cloud so everything is
+  // visible from the reframed camera.
+  if (scene.fog) {
+    scene.fog.near = extent * 1.5;
+    scene.fog.far  = extent * 6.0;
+  }
+  // Bump the camera far plane just in case.
+  camera.far = Math.max(camera.far, extent * 12);
+  camera.updateProjectionMatrix();
+
   console.log(`loaded ${bin.size} voxels (extent ${sizeX}x${sizeY}x${sizeZ})`);
 }
 
