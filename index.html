@@ -66,6 +66,43 @@
     box-shadow: 0 0 8px #7a00ff inset, 0 0 16px #ff3cac;
   }
   #loadzipbtn:hover { background: rgba(122, 0, 255, 0.18); }
+
+  #viewpanel {
+    position: fixed; left: 16px; bottom: 16px;
+    padding: 10px 12px;
+    border: 1px solid #00f0ff;
+    background: rgba(0, 10, 22, 0.65);
+    color: #00f0ff;
+    font-family: "Courier New", monospace;
+    letter-spacing: 1.5px;
+    font-size: 11px;
+    box-shadow: 0 0 8px #00f0ff inset, 0 0 14px #7a00ff;
+    min-width: 200px;
+    user-select: none;
+    display: none;   /* shown only while a capture is loaded */
+  }
+  #viewpanel .title {
+    color: #00f0ff; text-shadow: 0 0 4px #00f0ff;
+    margin-bottom: 8px; letter-spacing: 2.5px; font-weight: bold;
+  }
+  #viewpanel .grid {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 8px;
+  }
+  #viewpanel button {
+    border: 1px solid #00f0ff55;
+    background: rgba(0, 20, 40, 0.5);
+    color: #a8e8ff;
+    font-family: inherit;
+    letter-spacing: 1.5px;
+    font-size: 10px;
+    padding: 6px 0;
+    cursor: pointer;
+  }
+  #viewpanel button:hover { background: rgba(0, 240, 255, 0.12); color: #fff; }
+  #viewpanel button.active { background: rgba(0, 240, 255, 0.2); color: #fff; }
+  #viewpanel .row { display: flex; gap: 6px; margin-top: 6px; }
+  #viewpanel .row button { flex: 1; }
+  #viewpanel .hint { margin-top: 8px; color: #00f0ff99; font-size: 9px; letter-spacing: 1.2px; }
   #panel {
     position: fixed; bottom: 16px; right: 16px;
     padding: 12px 14px;
@@ -98,6 +135,23 @@
 <button id="loadzipbtn">LOAD .ZIP</button>
 <input id="loadfiles" type="file" multiple webkitdirectory style="display:none" />
 <input id="loadzipfile" type="file" accept=".zip,application/zip" style="display:none" />
+
+<div id="viewpanel">
+  <div class="title">VIEW</div>
+  <div class="grid">
+    <button data-view="front">FRONT</button>
+    <button data-view="back">BACK</button>
+    <button data-view="top">TOP</button>
+    <button data-view="left">LEFT</button>
+    <button data-view="right">RIGHT</button>
+    <button data-view="iso">ISO</button>
+  </div>
+  <div class="row">
+    <button id="view-reset">RESET</button>
+    <button id="view-spin">AUTO-SPIN</button>
+  </div>
+  <div class="hint">KEYS &nbsp; 1-6 = VIEWS &nbsp; · &nbsp; R = RESET &nbsp; · &nbsp; S = SPIN</div>
+</div>
 <div id="panel">
   <div class="title">JED TIME</div>
   <label>ENABLE <input type="checkbox" id="osc-toggle" /></label>
@@ -364,6 +418,53 @@ function buildWorld(seed) {
 
 buildWorld(Math.random() * 1000);
 
+// --- view controls (orbit presets, reset, auto-spin) -----------------------
+let viewExtent = 40;
+const viewTarget = new THREE.Vector3(0, 0, 0);
+let autoSpin = false;
+
+const VIEW_PRESETS = {
+  front: { x: 0,  y: 0.1, z: 1.4 },
+  back:  { x: 0,  y: 0.1, z: -1.4 },
+  left:  { x: -1.4, y: 0.1, z: 0 },
+  right: { x: 1.4, y: 0.1, z: 0 },
+  top:   { x: 0.01, y: 1.6, z: 0.01 },
+  iso:   { x: 0.9, y: 0.7, z: 1.2 },
+};
+
+function applyView(name) {
+  const p = VIEW_PRESETS[name] || VIEW_PRESETS.iso;
+  const d = viewExtent * 0.95;
+  controls.target.copy(viewTarget);
+  camera.position.set(p.x * d, p.y * d, p.z * d);
+  controls.update();
+  // highlight the active button.
+  document.querySelectorAll('#viewpanel [data-view]').forEach(b => {
+    b.classList.toggle('active', b.dataset.view === name);
+  });
+}
+
+document.querySelectorAll('#viewpanel [data-view]').forEach(b => {
+  b.addEventListener('click', () => applyView(b.dataset.view));
+});
+document.getElementById('view-reset').addEventListener('click', () => applyView('iso'));
+document.getElementById('view-spin').addEventListener('click', (ev) => {
+  autoSpin = !autoSpin;
+  ev.currentTarget.classList.toggle('active', autoSpin);
+});
+
+window.addEventListener('keydown', (ev) => {
+  // Don't hijack keys while the user is typing in a field.
+  if (ev.target && /INPUT|TEXTAREA/.test(ev.target.tagName)) return;
+  const map = { '1': 'front', '2': 'back', '3': 'left', '4': 'right', '5': 'top', '6': 'iso' };
+  if (map[ev.key]) { applyView(map[ev.key]); ev.preventDefault(); }
+  else if (ev.key.toLowerCase() === 'r') { applyView('iso'); }
+  else if (ev.key.toLowerCase() === 's') {
+    autoSpin = !autoSpin;
+    document.getElementById('view-spin').classList.toggle('active', autoSpin);
+  }
+});
+
 document.getElementById('regen').addEventListener('click', () => {
   buildWorld(Math.random() * 1000);
   // Restore fog + helpers + mesh orientation after a capture session.
@@ -371,6 +472,8 @@ document.getElementById('regen').addEventListener('click', () => {
   grid.visible = true;
   bounds.visible = true;
   if (voxelMesh) voxelMesh.rotation.z = 0;
+  document.getElementById('viewpanel').style.display = 'none';
+  autoSpin = false;
 });
 
 // --- TrueDepth capture loader ---
@@ -599,6 +702,11 @@ async function loadCapture(fileList) {
   // web view matches the phone preview.
   if (voxelMesh) voxelMesh.rotation.z = -Math.PI / 2;
 
+  // Hand the view panel what it needs to drive presets / auto-spin.
+  viewExtent = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 10);
+  viewTarget.set(0, 0, 0);
+  document.getElementById('viewpanel').style.display = 'block';
+
   // reframe the camera close to the object
   const sizeX = maxX - minX, sizeY = maxY - minY, sizeZ = maxZ - minZ;
   const extent = Math.max(sizeX, sizeY, sizeZ, 10);
@@ -761,6 +869,9 @@ function animate() {
   const dt = clock.getDelta();
   uTimeUniform.value += dt;
   chromaPass.uniforms.uTime.value += dt;
+  if (autoSpin && voxelMesh) {
+    voxelMesh.rotation.y += dt * 0.4;  // ~23°/sec
+  }
   controls.update();
   composer.render();
   frames++;
