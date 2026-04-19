@@ -894,13 +894,8 @@ const chromaPass = new ShaderPass(ChromaShader);
 composer.addPass(chromaPass);
 composer.addPass(new OutputPass());
 
-// pause autorotate while user drags
-controls.addEventListener('start', () => { controls.autoRotate = false; });
-let idleTimer = null;
-controls.addEventListener('end', () => {
-  clearTimeout(idleTimer);
-  idleTimer = setTimeout(() => { controls.autoRotate = true; }, 2500);
-});
+// (Idle-auto-rotate removed — AUTO-SPIN in the view panel is the
+// explicit rotation control now.)
 
 function onResize() {
   camera.aspect = window.innerWidth / window.innerHeight;
